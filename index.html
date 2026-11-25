@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src wss: ws://localhost:* ws://127.0.0.1:*; img-src data:; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src wss: https: ws://localhost:* ws://127.0.0.1:* http://localhost:* http://127.0.0.1:*; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Chat</title>
 <style>
 :root {
@@ -40,6 +40,10 @@ body[data-state="closed"] #dot { background: #d93025; }
 button { font: inherit; color: inherit; cursor: pointer; }
 #reset { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 6px 10px; font-size: 13px; min-height: 36px; }
 #notice { margin: 0; padding: 9px 14px; background: var(--warn-bg); color: var(--warn); font-size: 14px; }
+#notice.info { background: var(--bar); color: var(--dim); border-bottom: 1px solid var(--line); }
+#attach { flex: none; display: grid; place-items: center; width: 42px; height: 42px; border: 0; border-radius: 50%; background: none; color: var(--dim); }
+#attach:disabled { opacity: .45; cursor: default; }
+#attach svg { width: 26px; height: 26px; }
 #log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 14px; }
 #list { display: flex; flex-direction: column; gap: 8px; }
 #more { display: block; margin: 0 auto 12px; border: 1px solid var(--line); background: var(--bar); color: var(--dim); border-radius: 16px; padding: 6px 14px; font-size: 13px; min-height: 34px; }
@@ -90,6 +94,10 @@ dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; b
   <div id="list" aria-live="polite"></div>
 </main>
 <form id="composer">
+  <button id="attach" type="button" aria-label="傳送照片" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+  </button>
+  <input id="file" type="file" accept="image/*" hidden>
   <label class="sr" for="text">訊息</label>
   <textarea id="text" rows="1" maxlength="1000" enterkeyhint="send" autocomplete="off"></textarea>
   <button id="send" type="submit" disabled>傳送</button>
@@ -123,6 +131,8 @@ const HISTORY_MSG = {
   not_ready: "還沒讀到對話，稍後再試。",
 };
 const media = new Map();   // 圖片 id → data URL，只存在這個分頁的記憶體
+const attachBtn = $("attach"), fileInput = $("file");
+const MAX_UPLOAD = 95_000_000;
 
 let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
 let shown = [];          // 已渲染的訊息
@@ -136,11 +146,14 @@ function setState(state) {
   refreshSend();
 }
 function refreshSend() {
-  sendBtn.disabled = document.body.dataset.state !== "open" || !!pending || !!blocked || !text.value.trim();
+  const busy = document.body.dataset.state !== "open" || !!pending || !!blocked;
+  sendBtn.disabled = busy || !text.value.trim();
+  attachBtn.disabled = busy;
 }
-function showNotice(message) {
+function showNotice(message, info = false) {
   notice.textContent = message || "";
   notice.hidden = !message;
+  notice.classList.toggle("info", !!message && info);
 }
 
 const same = (a, b) => a.side === b.side && a.text === b.text && (a.kind || "text") === (b.kind || "text") &&
@@ -253,18 +266,58 @@ function handle(p) {
 
 function settle(message, ok) {
   clearTimeout(pending.timer);
+  const wasText = pending.kind === "text";
   pending = null;
-  if (ok) text.value = "";
+  if (ok && wasText) text.value = "";
   if (!blocked || message) showNotice(message);
   refreshSend();
 }
+
+function httpBase() {
+  return (localStorage.getItem(KEY_URL) || "").replace(/^wss:/, "https:").replace(/^ws:/, "http:");
+}
+
+function uploadAndSend(file) {
+  if (attachBtn.disabled || !ws) return;
+  if (file.size > MAX_UPLOAD) return showNotice("檔案超過 95 MB，無法傳送。");
+  const id = ++seq;
+  pending = { id, kind: "media", timer: 0 };
+  refreshSend();
+  showNotice("上傳中 0%", true);
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", httpBase() + "/upload");
+  xhr.setRequestHeader("x-pin", localStorage.getItem(KEY_PIN) || "");
+  xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+  xhr.upload.onprogress = (e) => {
+    if (e.lengthComputable && pending && pending.id === id) showNotice("上傳中 " + Math.round(e.loaded / e.total * 100) + "%", true);
+  };
+  xhr.onload = () => {
+    if (!pending || pending.id !== id) return;
+    let body = {};
+    try { body = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status !== 200) return settle(body.message || "上傳失敗（" + xhr.status + "）。", false);
+    if (!ws) return settle("連線中斷，檔案沒有送出。", false);
+    showNotice("送出中…", true);
+    pending.timer = setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 90000);
+    ws.send(JSON.stringify({ type: "send_media", upload: body.id, id }));
+  };
+  xhr.onerror = () => { if (pending && pending.id === id) settle("上傳失敗，請檢查網路。", false); };
+  xhr.send(file);
+}
+
+attachBtn.addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", () => {
+  const f = fileInput.files[0];
+  fileInput.value = "";
+  if (f) uploadAndSend(f);
+});
 
 $("composer").addEventListener("submit", (ev) => {
   ev.preventDefault();
   const value = text.value.trim();
   if (sendBtn.disabled || !value || !ws) return;
   const id = ++seq;
-  pending = { id, timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 15000) };
+  pending = { id, kind: "text", timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 15000) };
   showNotice("");
   refreshSend();
   ws.send(JSON.stringify({ text: value, id }));
