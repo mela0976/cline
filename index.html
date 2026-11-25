@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, interactive-widget=resizes-content">
+<meta name="color-scheme" content="light dark">
+<meta name="robots" content="noindex, nofollow">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src wss: ws://localhost:* ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<title>Chat</title>
+<style>
+:root {
+  color-scheme: light dark;
+  --bg: #e9eef3; --bar: #ffffff; --ink: #14181c; --dim: #6a737d; --line: #d5dbe1;
+  --theirs: #ffffff; --mine: #95e36b; --mine-ink: #10240a; --accent: #06a94d; --warn: #b3261e; --warn-bg: #fdeceb;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #101418; --bar: #1a2026; --ink: #e8ecef; --dim: #96a0aa; --line: #2b333b;
+    --theirs: #262e36; --mine: #2f7d32; --mine-ink: #f1fbef; --accent: #39c46a; --warn: #ffb4ab; --warn-bg: #3a1614;
+  }
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+body {
+  display: flex; flex-direction: column; height: 100dvh;
+  background: var(--bg); color: var(--ink);
+  font: 16px/1.45 system-ui, -apple-system, "Noto Sans TC", "PingFang TC", sans-serif;
+}
+header {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  padding-top: max(10px, env(safe-area-inset-top));
+  background: var(--bar); border-bottom: 1px solid var(--line);
+}
+#dot { width: 10px; height: 10px; border-radius: 50%; background: #e5a50a; flex: none; }
+body[data-state="open"] #dot { background: #1faa59; }
+body[data-state="closed"] #dot { background: #d93025; }
+#target { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#status { color: var(--dim); font-size: 13px; margin-inline-start: auto; white-space: nowrap; }
+button { font: inherit; color: inherit; cursor: pointer; }
+#reset { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 6px 10px; font-size: 13px; min-height: 36px; }
+#notice { margin: 0; padding: 9px 14px; background: var(--warn-bg); color: var(--warn); font-size: 14px; }
+#log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+.msg {
+  max-width: 78%; padding: 8px 12px; border-radius: 16px;
+  white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgb(0 0 0 / .08);
+}
+.msg.left { align-self: flex-start; background: var(--theirs); border-top-left-radius: 4px; }
+.msg.right { align-self: flex-end; background: var(--mine); color: var(--mine-ink); border-top-right-radius: 4px; }
+#composer {
+  display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px;
+  padding-bottom: max(8px, env(safe-area-inset-bottom));
+  background: var(--bar); border-top: 1px solid var(--line);
+}
+#text {
+  flex: 1; width: 100%; height: auto; field-sizing: content; min-block-size: 42px; max-block-size: 6lh; resize: none;
+  font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--line); border-radius: 20px; padding: 9px 14px;
+}
+#send { border: 0; border-radius: 20px; min-width: 64px; min-height: 42px; background: var(--accent); color: #fff; font-weight: 600; }
+#send:disabled { opacity: .45; cursor: default; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+dialog { border: 0; border-radius: 16px; padding: 22px; width: min(92vw, 380px); background: var(--bar); color: var(--ink); }
+dialog:modal { overscroll-behavior: contain; }
+dialog::backdrop { background: rgb(0 0 0 / .5); overflow: hidden; overscroll-behavior: contain; }
+dialog h1 { font-size: 18px; margin: 0 0 16px; }
+dialog label { display: block; font-size: 14px; color: var(--dim); margin-bottom: 14px; }
+dialog input {
+  display: block; width: 100%; margin-top: 6px; padding: 11px 12px; font: inherit; color: var(--ink);
+  background: var(--bg); border: 1px solid var(--line); border-radius: 10px;
+}
+dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; background: var(--accent); color: #fff; font-weight: 600; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+</style>
+</head>
+<body data-state="connecting">
+<header>
+  <span id="dot" aria-hidden="true"></span>
+  <span id="target"></span>
+  <span id="status" role="status">連線中</span>
+  <button id="reset" type="button">重設連線</button>
+</header>
+<p id="notice" role="alert" hidden></p>
+<main id="log" aria-live="polite"></main>
+<form id="composer">
+  <label class="sr" for="text">訊息</label>
+  <textarea id="text" rows="1" maxlength="1000" enterkeyhint="send" autocomplete="off"></textarea>
+  <button id="send" type="submit" disabled>傳送</button>
+</form>
+
+<dialog id="setup" aria-labelledby="setup-title" closedby="none">
+  <form id="setup-form">
+    <h1 id="setup-title">連線設定</h1>
+    <label>Tunnel 網址
+      <input id="f-url" type="text" inputmode="url" autocapitalize="off" autocorrect="off" spellcheck="false" placeholder="xxxx.trycloudflare.com" required autofocus>
+    </label>
+    <label>PIN
+      <input id="f-pin" type="password" inputmode="numeric" autocomplete="off" minlength="6" required>
+    </label>
+    <button type="submit">連線</button>
+  </form>
+</dialog>
+
+<script>
+"use strict";
+const KEY_URL = "sline.url", KEY_PIN = "sline.pin";
+const STATUS = { connecting: "連線中", open: "已連線", closed: "斷線，自動重連中" };
+const $ = (id) => document.getElementById(id);
+const log = $("log"), text = $("text"), sendBtn = $("send"), notice = $("notice"), setup = $("setup");
+
+let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
+let shown = [];          // 已渲染的訊息
+let pending = null;      // { id, timer }：等待後端確認的那一則
+let blocked = null;      // 後端回報的持續性警告（防呆鎖／裝置離線）
+let seq = 0;
+
+function setState(state) {
+  document.body.dataset.state = state;
+  $("status").textContent = STATUS[state];
+  refreshSend();
+}
+function refreshSend() {
+  sendBtn.disabled = document.body.dataset.state !== "open" || !!pending || !!blocked || !text.value.trim();
+}
+function showNotice(message) {
+  notice.textContent = message || "";
+  notice.hidden = !message;
+}
+
+function render(messages) {
+  let keep = 0;
+  while (keep < shown.length && keep < messages.length &&
+         shown[keep].side === messages[keep].side && shown[keep].text === messages[keep].text) keep++;
+  while (log.children.length > keep) log.lastElementChild.remove();
+  for (const m of messages.slice(keep)) {
+    const el = document.createElement("div");
+    el.className = "msg " + (m.side === "right" ? "right" : "left");
+    el.textContent = m.text;
+    log.append(el);
+  }
+  const grew = messages.length > keep;
+  shown = messages;
+  if (grew) log.scrollTop = log.scrollHeight;
+}
+
+function toWsBase(raw) {
+  let s = raw.trim();
+  if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = "https://" + s;
+  const u = new URL(s);
+  const plain = u.protocol === "http:" || u.protocol === "ws:";
+  return (plain ? "ws://" : "wss://") + u.host;
+}
+
+function connect() {
+  const base = localStorage.getItem(KEY_URL), pin = localStorage.getItem(KEY_PIN);
+  if (!base || !pin) return openSetup();
+  stopped = false;
+  clearTimeout(retryTimer);
+  setState("connecting");
+  const sock = ws = new WebSocket(base + "/ws?pin=" + encodeURIComponent(pin));
+  sock.onmessage = (ev) => { if (sock === ws) handle(JSON.parse(ev.data)); };
+  sock.onclose = () => {
+    if (sock !== ws || stopped) return;
+    ws = null;
+    if (pending) settle("連線中斷，無法確認上一則是否送達，請看對話再決定是否重傳。", false);
+    setState("closed");
+    retry++;
+    if (!everOpened && retry >= 3) showNotice("連不上後端，請確認 Tunnel 網址與 PIN，或按「重設連線」。");
+    retryTimer = setTimeout(connect, Math.min(15000, 1000 * 2 ** Math.min(retry, 4)));
+  };
+}
+
+function handle(p) {
+  if (p.type === "init") {
+    everOpened = true; retry = 0; blocked = null;
+    $("target").textContent = p.target;
+    document.title = p.target;
+    showNotice("");
+    setState("open");
+  } else if (p.type === "sync") {
+    render(p.messages);
+  } else if (p.type === "warning") {
+    blocked = p.code;
+    showNotice(p.message);
+    refreshSend();
+  } else if (p.type === "ready") {
+    blocked = null;
+    showNotice("");
+    refreshSend();
+  } else if (p.type === "ack" && pending && p.id === pending.id) {
+    settle(p.ok ? "" : p.message, p.ok);
+  }
+}
+
+function settle(message, ok) {
+  clearTimeout(pending.timer);
+  pending = null;
+  if (ok) text.value = "";
+  if (!blocked || message) showNotice(message);
+  refreshSend();
+}
+
+$("composer").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const value = text.value.trim();
+  if (sendBtn.disabled || !value || !ws) return;
+  const id = ++seq;
+  pending = { id, timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 15000) };
+  showNotice("");
+  refreshSend();
+  ws.send(JSON.stringify({ text: value, id }));
+});
+text.addEventListener("input", refreshSend);
+text.addEventListener("keydown", (ev) => {
+  // 桌面鍵盤 Enter 送出、Shift+Enter 換行；注音／輸入法選字中的 Enter 不送出。
+  if (ev.key !== "Enter" || ev.shiftKey || matchMedia("(pointer: coarse)").matches) return;
+  ev.preventDefault();
+  if (ev.isComposing || ev.keyCode === 229) return;
+  $("composer").requestSubmit();
+});
+
+function openSetup() {
+  $("f-url").value = localStorage.getItem(KEY_URL) || "";
+  $("f-pin").value = "";
+  document.body.dataset.state = "closed";
+  $("status").textContent = "未連線";
+  if (!setup.open) setup.showModal();
+}
+setup.addEventListener("cancel", (ev) => ev.preventDefault());
+$("setup-form").addEventListener("submit", (ev) => {
+  ev.preventDefault();
+  const urlField = $("f-url");
+  let base;
+  try { base = toWsBase(urlField.value); } catch { base = null; }
+  urlField.setCustomValidity(base ? "" : "網址格式不正確");
+  if (!ev.target.reportValidity()) return;
+  localStorage.setItem(KEY_URL, base);
+  localStorage.setItem(KEY_PIN, $("f-pin").value);
+  setup.close();
+  retry = 0; everOpened = false;
+  connect();
+});
+$("f-url").addEventListener("input", (ev) => ev.target.setCustomValidity(""));
+
+$("reset").addEventListener("click", () => {
+  stopped = true;
+  clearTimeout(retryTimer);
+  if (pending) { clearTimeout(pending.timer); pending = null; }
+  if (ws) { ws.close(); ws = null; }
+  localStorage.removeItem(KEY_URL);
+  localStorage.removeItem(KEY_PIN);
+  retry = 0; everOpened = false; blocked = null;
+  render([]);
+  $("target").textContent = "";
+  text.value = "";
+  showNotice("");
+  refreshSend();
+  openSetup();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && !ws && !stopped) { retry = 0; connect(); }
+});
+
+connect();
+</script>
+</body>
+</html>
