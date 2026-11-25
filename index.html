@@ -6,7 +6,7 @@
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src wss: ws://localhost:* ws://127.0.0.1:*; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src wss: ws://localhost:* ws://127.0.0.1:*; img-src data:; base-uri 'none'; form-action 'none'">
 <title>Chat</title>
 <style>
 :root {
@@ -40,13 +40,18 @@ body[data-state="closed"] #dot { background: #d93025; }
 button { font: inherit; color: inherit; cursor: pointer; }
 #reset { border: 1px solid var(--line); background: none; border-radius: 8px; padding: 6px 10px; font-size: 13px; min-height: 36px; }
 #notice { margin: 0; padding: 9px 14px; background: var(--warn-bg); color: var(--warn); font-size: 14px; }
-#log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+#log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 14px; }
+#list { display: flex; flex-direction: column; gap: 8px; }
+#more { display: block; margin: 0 auto 12px; border: 1px solid var(--line); background: var(--bar); color: var(--dim); border-radius: 16px; padding: 6px 14px; font-size: 13px; min-height: 34px; }
+#more:disabled { cursor: default; opacity: .7; }
 .msg {
   max-width: 78%; padding: 8px 12px; border-radius: 16px;
   white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgb(0 0 0 / .08);
 }
 .msg.left { align-self: flex-start; background: var(--theirs); border-top-left-radius: 4px; }
 .msg.right { align-self: flex-end; background: var(--mine); color: var(--mine-ink); border-top-right-radius: 4px; }
+.msg.media { padding: 0; overflow: hidden; background: var(--line); box-shadow: none; border-radius: 12px; }
+.msg.media img { display: block; width: 100%; height: 100%; object-fit: cover; }
 #composer {
   display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px;
   padding-bottom: max(8px, env(safe-area-inset-bottom));
@@ -80,7 +85,10 @@ dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; b
   <button id="reset" type="button">重設連線</button>
 </header>
 <p id="notice" role="alert" hidden></p>
-<main id="log" aria-live="polite"></main>
+<main id="log">
+  <button id="more" type="button">載入更早訊息</button>
+  <div id="list" aria-live="polite"></div>
+</main>
 <form id="composer">
   <label class="sr" for="text">訊息</label>
   <textarea id="text" rows="1" maxlength="1000" enterkeyhint="send" autocomplete="off"></textarea>
@@ -105,7 +113,16 @@ dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; b
 const KEY_URL = "sline.url", KEY_PIN = "sline.pin";
 const STATUS = { connecting: "連線中", open: "已連線", closed: "斷線，自動重連中" };
 const $ = (id) => document.getElementById(id);
-const log = $("log"), text = $("text"), sendBtn = $("send"), notice = $("notice"), setup = $("setup");
+const log = $("log"), list = $("list"), more = $("more"), text = $("text"), sendBtn = $("send"), notice = $("notice"), setup = $("setup");
+const MORE_TEXT = "載入更早訊息";
+const HISTORY_MSG = {
+  gap: "捲動時跳過了一段，沒有接上，請再按一次。",
+  not_bottom: "載入後沒能回到最新訊息，新訊息可能暫時讀不到。",
+  off_target: "雲端畫面不在目標聊天室，無法載入。",
+  device_error: "無法連上 Android 容器。",
+  not_ready: "還沒讀到對話，稍後再試。",
+};
+const media = new Map();   // 圖片 id → data URL，只存在這個分頁的記憶體
 
 let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
 let shown = [];          // 已渲染的訊息
@@ -126,17 +143,50 @@ function showNotice(message) {
   notice.hidden = !message;
 }
 
-function render(messages) {
-  let keep = 0;
-  while (keep < shown.length && keep < messages.length &&
-         shown[keep].side === messages[keep].side && shown[keep].text === messages[keep].text) keep++;
-  while (log.children.length > keep) log.lastElementChild.remove();
-  for (const m of messages.slice(keep)) {
-    const el = document.createElement("div");
-    el.className = "msg " + (m.side === "right" ? "right" : "left");
+const same = (a, b) => a.side === b.side && a.text === b.text && (a.kind || "text") === (b.kind || "text") &&
+  (a.media || null) === (b.media || null) && a.w === b.w && a.h === b.h;
+
+function fillMedia(el) {
+  const src = media.get(el.dataset.media);
+  if (!src || el.firstChild) return;
+  const img = new Image();
+  img.alt = "圖片";
+  img.src = src;
+  el.append(img);
+}
+
+function bubble(m) {
+  const el = document.createElement("div");
+  el.className = "msg " + (m.side === "right" ? "right" : "left");
+  if (m.kind === "media") {
+    // Android 畫面 720px 寬、2 倍密度：除以 2 即為實際顯示大小；圖片未到前先保留同樣大小的空位
+    el.classList.add("media");
+    el.style.width = Math.round(m.w / 2) + "px";
+    el.style.aspectRatio = m.w + " / " + m.h;
+    if (m.media) { el.dataset.media = m.media; fillMedia(el); }
+  } else {
     el.textContent = m.text;
-    log.append(el);
   }
+  return el;
+}
+
+function render(messages) {
+  const n = shown.length;
+  const prepended = n > 0 && messages.length > n && shown.every((m, i) => same(m, messages[messages.length - n + i]));
+  if (prepended) {
+    // 較早的訊息接在上方：維持目前看到的位置，不要跳走
+    const fromBottom = log.scrollHeight - log.scrollTop;
+    const frag = document.createDocumentFragment();
+    for (const m of messages.slice(0, messages.length - n)) frag.append(bubble(m));
+    list.prepend(frag);
+    log.scrollTop = log.scrollHeight - fromBottom;
+    shown = messages;
+    return;
+  }
+  let keep = 0;
+  while (keep < n && keep < messages.length && same(shown[keep], messages[keep])) keep++;
+  while (list.children.length > keep) list.lastElementChild.remove();
+  for (const m of messages.slice(keep)) list.append(bubble(m));
   const grew = messages.length > keep;
   shown = messages;
   if (grew) log.scrollTop = log.scrollHeight;
@@ -162,6 +212,7 @@ function connect() {
     if (sock !== ws || stopped) return;
     ws = null;
     if (pending) settle("連線中斷，無法確認上一則是否送達，請看對話再決定是否重傳。", false);
+    if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
     setState("closed");
     retry++;
     if (!everOpened && retry >= 3) showNotice("連不上後端，請確認 Tunnel 網址與 PIN，或按「重設連線」。");
@@ -175,9 +226,18 @@ function handle(p) {
     $("target").textContent = p.target;
     document.title = p.target;
     showNotice("");
+    more.disabled = false;
+    more.textContent = MORE_TEXT;
     setState("open");
   } else if (p.type === "sync") {
     render(p.messages);
+  } else if (p.type === "media") {
+    media.set(p.id, p.data);
+    for (const el of list.querySelectorAll("[data-media]")) if (el.dataset.media === p.id) fillMedia(el);
+  } else if (p.type === "history") {
+    more.disabled = p.code === "no_more";
+    more.textContent = p.code === "no_more" ? "沒有更早的訊息了" : MORE_TEXT;
+    if (HISTORY_MSG[p.code]) showNotice(HISTORY_MSG[p.code]);
   } else if (p.type === "warning") {
     blocked = p.code;
     showNotice(p.message);
@@ -210,6 +270,13 @@ $("composer").addEventListener("submit", (ev) => {
   ws.send(JSON.stringify({ text: value, id }));
 });
 text.addEventListener("input", refreshSend);
+more.addEventListener("click", () => {
+  if (!ws || document.body.dataset.state !== "open" || more.disabled) return;
+  more.disabled = true;
+  more.textContent = "載入中…";
+  showNotice("");
+  ws.send(JSON.stringify({ type: "history" }));
+});
 text.addEventListener("keydown", (ev) => {
   // 桌面鍵盤 Enter 送出、Shift+Enter 換行；注音／輸入法選字中的 Enter 不送出。
   if (ev.key !== "Enter" || ev.shiftKey || matchMedia("(pointer: coarse)").matches) return;
@@ -250,6 +317,9 @@ $("reset").addEventListener("click", () => {
   localStorage.removeItem(KEY_PIN);
   retry = 0; everOpened = false; blocked = null;
   render([]);
+  media.clear();
+  more.disabled = false;
+  more.textContent = MORE_TEXT;
   $("target").textContent = "";
   text.value = "";
   showNotice("");
