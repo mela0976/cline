@@ -48,9 +48,16 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #sticker:disabled { opacity: .45; cursor: default; }
 #stickers:modal { width: min(100vw, 560px); max-width: 100vw; height: min(72dvh, 620px); margin: auto auto 0; padding: 0; border-radius: 16px 16px 0 0; }
 #stickers[open] { display: flex; flex-direction: column; }
+#st-mode { display: flex; gap: 6px; padding: 12px 12px 0; flex: none; }
+#st-mode button { flex: 1; min-height: 44px; border: 1px solid var(--line); border-radius: 22px; background: none; color: var(--ink); font-weight: 400; font-size: 15px; }
+#st-mode button[aria-selected="true"] { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+#st-pack-name { flex: none; margin: 0; padding: 0 14px 4px; font-size: 12px; color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #st-cats { display: flex; gap: 6px; overflow-x: auto; padding: 12px 12px 8px; flex: none; scrollbar-width: none; }
 #st-cats button { flex: none; width: auto; min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 17px; background: none; color: var(--ink); font-weight: 400; font-size: 14px; }
 #st-cats button[aria-pressed="true"] { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+#st-cats button.pk { width: 46px; min-height: 46px; height: 46px; padding: 2px; border-radius: 12px; background: #fff; overflow: hidden; }
+#st-cats button.pk[aria-pressed="true"] { background: #fff; border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent); }
+#st-cats button.pk img { display: block; width: 40px; height: 40px; object-fit: contain; border-radius: 8px; }
 #st-grid { flex: 1; min-height: 0; overflow-y: scroll; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-width: thin; scrollbar-color: var(--dim) transparent; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 4px 12px; align-content: start; grid-auto-rows: max-content; }  /* 列高不可被壓縮，超出就捲動 */
 #st-grid::-webkit-scrollbar { width: 6px; }
 #st-grid::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
@@ -58,6 +65,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #st-grid button[aria-pressed="true"] { border-color: var(--accent); }
 #st-grid img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; }
 #st-grid p { grid-column: 1 / -1; text-align: center; color: var(--dim); font-size: 14px; margin: 24px 0; }
+#st-retry { grid-column: 1 / -1; aspect-ratio: auto !important; width: auto; min-height: 44px; margin: 0 auto; padding: 0 20px; border: 1px solid var(--line); border-radius: 22px; background: none; color: var(--ink); font-weight: 400; font-size: 14px; }
 #st-more { grid-column: 1 / -1; aspect-ratio: auto !important; width: auto; min-height: 36px; margin: 6px auto 10px; padding: 0 16px; border: 1px solid var(--line); border-radius: 18px; background: none; color: var(--dim); font-weight: 400; font-size: 13px; }
 #st-bar { display: flex; gap: 8px; padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); flex: none; }
 #st-bar button { min-height: 44px; border-radius: 22px; }
@@ -246,7 +254,12 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
 </div>
 
 <dialog id="stickers" aria-label="LINE 貼圖" closedby="any">
+  <div id="st-mode" role="tablist" aria-label="貼圖瀏覽方式">
+    <button type="button" role="tab" data-mode="cat" aria-selected="true">分類</button>
+    <button type="button" role="tab" data-mode="pack" aria-selected="false">角色</button>
+  </div>
   <div id="st-cats" role="toolbar" aria-label="分類"></div>
+  <p id="st-pack-name" hidden></p>
   <div id="st-grid"></div>
   <div id="st-bar">
     <button id="st-close" type="button" aria-label="關閉">✕</button>
@@ -308,6 +321,15 @@ const attachBtn = $("attach"), fileInput = $("file");
 const MAX_UPLOAD = 95_000_000;
 const stickerBtn = $("sticker"), stickerDlg = $("stickers"), stCats = $("st-cats"), stGrid = $("st-grid"), stSend = $("st-send");
 let stickerCats = [], curCat = null, picked = null, stLoading = false, stShownCat = null;
+const KEY_STMODE = "sline.stmode", KEY_STPACK = "sline.stpack";
+const stMode$ = $("st-mode"), stPackName = $("st-pack-name");
+const lsGet = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch {} };
+let stMode = lsGet(KEY_STMODE) === "pack" ? "pack" : "cat";   // 目前瀏覽方式：分類 / 角色（貼圖組）
+let stickerPacks = [], packsLoading = false;                  // [{ name, icon }]，圖示只放記憶體
+let catSel = null, packSel = lsGet(KEY_STPACK) ? "pack:" + lsGet(KEY_STPACK) : null;   // 各模式最後選的 key
+const stTabScroll = { cat: 0, pack: 0 };                      // 各模式分頁列的橫向捲動位置
+const catName = (k) => (k && k.startsWith("pack:") ? k.slice(5) : k);   // 顯示用：去掉 "pack:" 前綴
 const stickerCache = new Map();   // 分類 → { items: [{n, img}], more, page }
 
 let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
@@ -587,7 +609,8 @@ function connect() {
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
     for (const c of stickerCache.values()) c.loading = false;   // 斷線：沒回來的貼圖請求不算數
     if (stLoading) stLoading = false;
-    if (stickerDlg.open) renderStickers();
+    packsLoading = false;   // 斷線：貼圖組請求不會回來，別卡在讀取中
+    if (stickerDlg.open) { renderCats(); renderStickers(); }
     if (viewReq) finishView("顯示的是縮圖");
     if (fileReq) { clearFileReq(); showNotice("連線中斷，檔案請求已取消。"); }
     setState("closed");
@@ -634,8 +657,15 @@ function handle(p) {
   } else if (p.type === "sticker_categories") {
     stickerCats = p.items || [];
     stLoading = false;
+    if (stMode !== "cat") return;   // 角色模式下只存清單，切回分類時再用
     if (!stickerCats.length) { stickerCache.set(null, { items: [], more: false, page: 0, error: "讀不到 LINE 的貼圖分類。" }); curCat = null; renderCats(); renderStickers(); }
     else pickCategory(stickerCats.includes(curCat) ? curCat : stickerCats[0]);
+  } else if (p.type === "sticker_packs") {
+    packsLoading = false;
+    stickerPacks = Array.isArray(p.items) ? p.items.filter((x) => x && x.name) : [];
+    if (stMode !== "pack") return;
+    if (stickerPacks.length) enterMode();
+    else { curCat = null; renderCats(); renderStickers(); }
   } else if (p.type === "stickers") {
     const c = stickerCache.get(p.category) || { items: [], more: true, page: -1 };
     c.loading = false;
@@ -746,31 +776,55 @@ function uploadAndSend(file, cb) {
   xhr.send(file);
 }
 
+// 目前模式的分頁 key：分類用名稱，角色用 "pack:" + 貼圖組名稱
+function tabKeys() {
+  return stMode === "pack" ? stickerPacks.map((x) => "pack:" + x.name) : stickerCats;
+}
+
+function makeTab(key) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.dataset.cat = key;
+  if (stMode === "pack") {
+    const name = catName(key), pk = stickerPacks.find((x) => x.name === name);
+    b.className = "pk";
+    b.title = name;
+    b.setAttribute("aria-label", name);
+    if (pk && pk.icon) {
+      const img = new Image();
+      img.src = pk.icon; img.alt = ""; img.draggable = false;
+      b.append(img);
+    } else b.textContent = name.slice(0, 2);
+  } else b.textContent = key;
+  b.addEventListener("click", () => pickCategory(key));
+  return b;
+}
+
 function renderCats() {
+  const keys = tabKeys();
   const have = [...stCats.children].map((b) => b.dataset.cat);
-  if (have.length !== stickerCats.length || have.some((n, i) => n !== stickerCats[i])) {
-    stCats.replaceChildren(...stickerCats.map((name) => {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.textContent = name;
-      b.dataset.cat = name;
-      b.addEventListener("click", () => pickCategory(name));
-      return b;
-    }));
+  if (stCats.dataset.mode !== stMode || have.length !== keys.length || have.some((n, i) => n !== keys[i])) {
+    stCats.replaceChildren(...keys.map(makeTab));
+    stCats.dataset.mode = stMode;
+    stCats.scrollLeft = stTabScroll[stMode];   // 換模式重畫後回到該模式上次的位置
   }
+  stCats.setAttribute("aria-label", stMode === "pack" ? "貼圖組" : "分類");
   // 只更新選取狀態，不重畫整排：重畫會讓橫向捲動位置跳回最左邊
   for (const b of stCats.children) b.setAttribute("aria-pressed", String(b.dataset.cat === curCat));
   const cur = [...stCats.children].find((b) => b.dataset.cat === curCat);
   if (cur && stickerDlg.open) cur.scrollIntoView({ inline: "nearest", block: "nearest" });
+  stPackName.hidden = stMode !== "pack";
+  stPackName.textContent = stMode === "pack" && curCat ? catName(curCat) : "";
 }
 
 function renderStickers() {
+  if (stMode === "pack" && (packsLoading || !stickerPacks.length)) return renderPacksPlaceholder();
   const c = stickerCache.get(curCat);
   const nodes = [];
   for (const it of c ? c.items : []) {
     const b = document.createElement("button");
     b.type = "button";
-    b.setAttribute("aria-label", curCat + " 第 " + it.n + " 張");
+    b.setAttribute("aria-label", catName(curCat) + " 第 " + it.n + " 張");
     b.setAttribute("aria-pressed", String(!!picked && picked.cat === curCat && picked.n === it.n));
     const img = new Image();
     img.src = it.img;
@@ -783,7 +837,7 @@ function renderStickers() {
     });
     nodes.push(b);
   }
-  if (stLoading || (c && c.loading)) {
+  if ((stMode === "cat" && stLoading) || (c && c.loading)) {
     const p = document.createElement("p"); p.textContent = "讀取中…"; nodes.push(p);
   } else if (c && c.error) {
     const p = document.createElement("p"); p.textContent = c.error; nodes.push(p);
@@ -798,6 +852,33 @@ function renderStickers() {
   stGrid.replaceChildren(...nodes);
   stGrid.scrollTop = top;
   stShownCat = curCat;
+  stSend.disabled = !(picked && picked.cat === curCat);
+}
+
+// 角色模式：貼圖組清單還沒到（讀取中）或讀失敗（可重試）
+function renderPacksPlaceholder() {
+  const p = document.createElement("p");
+  const nodes = [p];
+  if (packsLoading) p.textContent = "讀取貼圖組中…（第一次約 30–60 秒）";
+  else {
+    p.textContent = "讀不到貼圖組，請再試一次。";
+    const r = document.createElement("button");
+    r.id = "st-retry"; r.type = "button"; r.textContent = "重試";
+    r.addEventListener("click", requestPacks);
+    nodes.push(r);
+  }
+  stGrid.replaceChildren(...nodes);
+  stShownCat = null;
+  stSend.disabled = true;
+}
+
+function requestPacks() {
+  if (!ws || packsLoading) return;
+  packsLoading = true;
+  curCat = null;
+  renderCats();
+  renderStickers();
+  ws.send(JSON.stringify({ type: "sticker_packs" }));
 }
 
 function requestStickers(name, page) {
@@ -815,12 +896,14 @@ function requestStickers(name, page) {
 // 滑到接近底部就自動載入下一頁，不一定要按「更多」
 function onStickerScroll() {
   const c = stickerCache.get(curCat);
-  if (!c || !c.more || c.error || c.loading || stLoading) return;
+  if (!c || !c.more || c.error || c.loading || (stMode === "cat" && stLoading)) return;
   if (stGrid.scrollTop + stGrid.clientHeight >= stGrid.scrollHeight - 120) requestStickers(curCat, c.page + 1);
 }
 
 function pickCategory(name) {
   curCat = name;
+  if (stMode === "pack") { packSel = name; lsSet(KEY_STPACK, catName(name)); }
+  else catSel = name;
   renderCats();
   const c = stickerCache.get(name);
   renderStickers();   // 一定先切過去（有快取就顯示，沒有就顯示「讀取中…」）
@@ -828,14 +911,38 @@ function pickCategory(name) {
   if (!c || (!c.items.length && !c.error && !c.loading)) requestStickers(name, 0);
 }
 
+// 依目前模式把畫面準備好：清單沒載過就先請求，載過就選回該模式上次的項目
+function enterMode() {
+  for (const b of stMode$.children) b.setAttribute("aria-selected", String(b.dataset.mode === stMode));
+  if (stMode === "pack" ? !stickerPacks.length : !stickerCats.length) {
+    curCat = null;
+    if (stMode === "pack") { if (!packsLoading && ws) return requestPacks(); }
+    else if (!stLoading && ws) { stLoading = true; ws.send(JSON.stringify({ type: "sticker_categories" })); }
+    renderCats(); renderStickers();
+    return;
+  }
+  const keys = tabKeys(), sel = stMode === "pack" ? packSel : catSel;
+  const want = keys.includes(sel) ? sel : keys[0];
+  if (curCat === want) { renderCats(); renderStickers(); } else pickCategory(want);
+}
+
+function setMode(m) {
+  if (m === stMode) return;
+  stTabScroll[stMode] = stCats.scrollLeft;
+  stMode = m;
+  lsSet(KEY_STMODE, m);
+  enterMode();
+}
+
+stMode$.addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-mode]");
+  if (b) setMode(b.dataset.mode);
+});
+
 stickerBtn.addEventListener("click", () => {
   if (stickerBtn.disabled || !ws) return;
   stickerDlg.showModal();
-  if (!stickerCats.length) {
-    stLoading = true;
-    renderStickers();
-    ws.send(JSON.stringify({ type: "sticker_categories" }));
-  }
+  enterMode();
 });
 $("st-close").addEventListener("click", () => stickerDlg.close());
 stGrid.addEventListener("scroll", onStickerScroll, { passive: true });
@@ -1435,6 +1542,8 @@ $("reset").addEventListener("click", () => {
   render([]);
   media.clear();
   stickerCats = []; stickerCache.clear(); curCat = null; picked = null; stLoading = false;
+  stickerPacks = []; packsLoading = false; catSel = packSel = null; stMode = "cat"; stCats.dataset.mode = ""; stTabScroll.cat = stTabScroll.pack = 0;
+  try { localStorage.removeItem(KEY_STMODE); localStorage.removeItem(KEY_STPACK); } catch {}
   if (stickerDlg.open) stickerDlg.close();
   more.disabled = false;
   more.textContent = MORE_TEXT;
