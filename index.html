@@ -585,7 +585,9 @@ function connect() {
     if (pending) settle("連線中斷，無法確認上一則是否送達，請看對話再決定是否重傳。", false);
     if (openingName || closing || chatOpening) abortOpen("");
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
-    if (stLoading) { stLoading = false; renderStickers(); }
+    for (const c of stickerCache.values()) c.loading = false;   // 斷線：沒回來的貼圖請求不算數
+    if (stLoading) stLoading = false;
+    if (stickerDlg.open) renderStickers();
     if (viewReq) finishView("顯示的是縮圖");
     if (fileReq) { clearFileReq(); showNotice("連線中斷，檔案請求已取消。"); }
     setState("closed");
@@ -635,8 +637,8 @@ function handle(p) {
     if (!stickerCats.length) { stickerCache.set(null, { items: [], more: false, page: 0, error: "讀不到 LINE 的貼圖分類。" }); curCat = null; renderCats(); renderStickers(); }
     else pickCategory(stickerCats.includes(curCat) ? curCat : stickerCats[0]);
   } else if (p.type === "stickers") {
-    stLoading = false;
     const c = stickerCache.get(p.category) || { items: [], more: true, page: -1 };
+    c.loading = false;
     const hadCount = c.items.length;
     if (p.code === "ok") {
       const have = new Set(c.items.map((i) => i.n));
@@ -745,14 +747,21 @@ function uploadAndSend(file, cb) {
 }
 
 function renderCats() {
-  stCats.replaceChildren(...stickerCats.map((name) => {
-    const b = document.createElement("button");
-    b.type = "button";
-    b.textContent = name;
-    b.setAttribute("aria-pressed", String(name === curCat));
-    b.addEventListener("click", () => pickCategory(name));
-    return b;
-  }));
+  const have = [...stCats.children].map((b) => b.dataset.cat);
+  if (have.length !== stickerCats.length || have.some((n, i) => n !== stickerCats[i])) {
+    stCats.replaceChildren(...stickerCats.map((name) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = name;
+      b.dataset.cat = name;
+      b.addEventListener("click", () => pickCategory(name));
+      return b;
+    }));
+  }
+  // 只更新選取狀態，不重畫整排：重畫會讓橫向捲動位置跳回最左邊
+  for (const b of stCats.children) b.setAttribute("aria-pressed", String(b.dataset.cat === curCat));
+  const cur = [...stCats.children].find((b) => b.dataset.cat === curCat);
+  if (cur && stickerDlg.open) cur.scrollIntoView({ inline: "nearest", block: "nearest" });
 }
 
 function renderStickers() {
@@ -774,7 +783,7 @@ function renderStickers() {
     });
     nodes.push(b);
   }
-  if (stLoading) {
+  if (stLoading || (c && c.loading)) {
     const p = document.createElement("p"); p.textContent = "讀取中…"; nodes.push(p);
   } else if (c && c.error) {
     const p = document.createElement("p"); p.textContent = c.error; nodes.push(p);
@@ -792,8 +801,12 @@ function renderStickers() {
 }
 
 function requestStickers(name, page) {
-  if (!ws || stLoading) return;
-  stLoading = true;
+  if (!ws) return;
+  // 每個分類各自記「載入中」：別的分類還在讀也能切換（後端會依序處理）
+  const c = stickerCache.get(name) || { items: [], more: true, page: -1 };
+  stickerCache.set(name, c);
+  if (c.loading) return;
+  c.loading = true;
   renderStickers();
   if (page > 0) stGrid.scrollTop = stGrid.scrollHeight;   // 讓「讀取中…」看得到
   ws.send(JSON.stringify({ type: "stickers", category: name, page }));
@@ -802,16 +815,17 @@ function requestStickers(name, page) {
 // 滑到接近底部就自動載入下一頁，不一定要按「更多」
 function onStickerScroll() {
   const c = stickerCache.get(curCat);
-  if (!c || !c.more || c.error || stLoading) return;
+  if (!c || !c.more || c.error || c.loading || stLoading) return;
   if (stGrid.scrollTop + stGrid.clientHeight >= stGrid.scrollHeight - 120) requestStickers(curCat, c.page + 1);
 }
 
 function pickCategory(name) {
   curCat = name;
   renderCats();
+  const c = stickerCache.get(name);
+  renderStickers();   // 一定先切過去（有快取就顯示，沒有就顯示「讀取中…」）
   stGrid.scrollTop = 0;
-  if (stickerCache.has(name)) renderStickers();
-  else requestStickers(name, 0);
+  if (!c || (!c.items.length && !c.error && !c.loading)) requestStickers(name, 0);
 }
 
 stickerBtn.addEventListener("click", () => {
