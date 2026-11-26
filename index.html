@@ -226,10 +226,10 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
   <button id="reply-x" type="button" aria-label="取消回覆">✕</button>
 </div>
 <form id="composer">
-  <button id="attach" type="button" aria-label="傳送照片" disabled>
+  <button id="attach" type="button" aria-label="傳送照片、影片或檔案" disabled>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
   </button>
-  <input id="file" type="file" accept="image/*" hidden>
+  <input id="file" type="file" accept="image/*,video/*,application/pdf,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.zip,.txt" hidden>
   <button id="sticker" type="button" aria-label="LINE 貼圖" disabled>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>
   </button>
@@ -718,6 +718,7 @@ function uploadAndSend(file, cb) {
   xhr.open("POST", httpBase() + "/upload");
   xhr.setRequestHeader("x-pin", localStorage.getItem(KEY_PIN) || "");
   xhr.setRequestHeader("content-type", file.type || "application/octet-stream");
+  if (file.name) xhr.setRequestHeader("x-name", encodeURIComponent(file.name));   // 影片／文件以檔案傳送時，對方看到原檔名
   xhr.upload.onprogress = (e) => {
     if (e.lengthComputable && pending && pending.id === id) showNotice("上傳中 " + Math.round(e.loaded / e.total * 100) + "%", true);
   };
