@@ -43,7 +43,24 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #notice.info { background: var(--bar); color: var(--dim); border-bottom: 1px solid var(--line); }
 #attach { flex: none; display: grid; place-items: center; width: 42px; height: 42px; border: 0; border-radius: 50%; background: none; color: var(--dim); }
 #attach:disabled { opacity: .45; cursor: default; }
-#attach svg { width: 26px; height: 26px; }
+#attach svg, #sticker svg { width: 26px; height: 26px; }
+#sticker { flex: none; display: grid; place-items: center; width: 42px; height: 42px; border: 0; border-radius: 50%; background: none; color: var(--dim); }
+#sticker:disabled { opacity: .45; cursor: default; }
+#stickers:modal { width: min(100vw, 560px); max-width: 100vw; height: min(72dvh, 620px); margin: auto auto 0; padding: 0; border-radius: 16px 16px 0 0; }
+#stickers[open] { display: flex; flex-direction: column; }
+#st-cats { display: flex; gap: 6px; overflow-x: auto; padding: 12px 12px 8px; flex: none; scrollbar-width: none; }
+#st-cats button { flex: none; width: auto; min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 17px; background: none; color: var(--ink); font-weight: 400; font-size: 14px; }
+#st-cats button[aria-pressed="true"] { background: var(--ink); color: var(--bar); border-color: var(--ink); }
+#st-grid { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 4px 12px; align-content: start; }
+#st-grid button { width: auto; min-height: 0; padding: 4px; border: 2px solid transparent; border-radius: 12px; background: #fff; overflow: hidden; }
+#st-grid button[aria-pressed="true"] { border-color: var(--accent); }
+#st-grid img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; }
+#st-grid p { grid-column: 1 / -1; text-align: center; color: var(--dim); font-size: 14px; margin: 24px 0; }
+#st-more { grid-column: 1 / -1; width: auto; min-height: 36px; margin: 6px auto 10px; padding: 0 16px; border: 1px solid var(--line); border-radius: 18px; background: none; color: var(--dim); font-weight: 400; font-size: 13px; }
+#st-bar { display: flex; gap: 8px; padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); flex: none; }
+#st-bar button { min-height: 44px; border-radius: 22px; }
+#st-close { width: 44px; flex: none; background: none; color: var(--dim); border: 1px solid var(--line); font-weight: 400; }
+#st-send:disabled { opacity: .45; cursor: default; }
 #log { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 10px 12px 14px; }
 #list { display: flex; flex-direction: column; gap: 8px; }
 #more { display: block; margin: 0 auto 12px; border: 1px solid var(--line); background: var(--bar); color: var(--dim); border-radius: 16px; padding: 6px 14px; font-size: 13px; min-height: 34px; }
@@ -98,10 +115,22 @@ dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; b
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
   </button>
   <input id="file" type="file" accept="image/*" hidden>
+  <button id="sticker" type="button" aria-label="LINE 貼圖" disabled>
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0M9 9.5h.01M15 9.5h.01"/></svg>
+  </button>
   <label class="sr" for="text">訊息</label>
   <textarea id="text" rows="1" maxlength="1000" enterkeyhint="send" autocomplete="off"></textarea>
   <button id="send" type="submit" disabled>傳送</button>
 </form>
+
+<dialog id="stickers" aria-label="LINE 貼圖" closedby="any">
+  <div id="st-cats" role="toolbar" aria-label="分類"></div>
+  <div id="st-grid"></div>
+  <div id="st-bar">
+    <button id="st-close" type="button" aria-label="關閉">✕</button>
+    <button id="st-send" type="button" disabled>傳送</button>
+  </div>
+</dialog>
 
 <dialog id="setup" aria-labelledby="setup-title" closedby="none">
   <form id="setup-form">
@@ -133,6 +162,9 @@ const HISTORY_MSG = {
 const media = new Map();   // 圖片 id → data URL，只存在這個分頁的記憶體
 const attachBtn = $("attach"), fileInput = $("file");
 const MAX_UPLOAD = 95_000_000;
+const stickerBtn = $("sticker"), stickerDlg = $("stickers"), stCats = $("st-cats"), stGrid = $("st-grid"), stSend = $("st-send");
+let stickerCats = [], curCat = null, picked = null, stLoading = false;
+const stickerCache = new Map();   // 分類 → { items: [{n, img}], more, page }
 
 let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
 let shown = [];          // 已渲染的訊息
@@ -149,6 +181,7 @@ function refreshSend() {
   const busy = document.body.dataset.state !== "open" || !!pending || !!blocked;
   sendBtn.disabled = busy || !text.value.trim();
   attachBtn.disabled = busy;
+  stickerBtn.disabled = busy;
 }
 function showNotice(message, info = false) {
   notice.textContent = message || "";
@@ -226,6 +259,7 @@ function connect() {
     ws = null;
     if (pending) settle("連線中斷，無法確認上一則是否送達，請看對話再決定是否重傳。", false);
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
+    if (stLoading) { stLoading = false; renderStickers(); }
     setState("closed");
     retry++;
     if (!everOpened && retry >= 3) showNotice("連不上後端，請確認 Tunnel 網址與 PIN，或按「重設連線」。");
@@ -247,6 +281,25 @@ function handle(p) {
   } else if (p.type === "media") {
     media.set(p.id, p.data);
     for (const el of list.querySelectorAll("[data-media]")) if (el.dataset.media === p.id) fillMedia(el);
+  } else if (p.type === "sticker_categories") {
+    stickerCats = p.items || [];
+    stLoading = false;
+    if (!stickerCats.length) { stickerCache.set(null, { items: [], more: false, page: 0, error: "讀不到 LINE 的貼圖分類。" }); curCat = null; renderCats(); renderStickers(); }
+    else pickCategory(stickerCats.includes(curCat) ? curCat : stickerCats[0]);
+  } else if (p.type === "stickers") {
+    stLoading = false;
+    const c = stickerCache.get(p.category) || { items: [], more: true, page: -1 };
+    if (p.code === "ok") {
+      const have = new Set(c.items.map((i) => i.n));
+      c.items.push(...p.items.filter((i) => !have.has(i.n)));
+      c.more = p.more;
+      c.page = p.page;
+      delete c.error;
+    } else {
+      c.error = p.code === "device_error" ? "無法連上 Android 容器。" : "讀不到這個分類的貼圖。";
+    }
+    stickerCache.set(p.category, c);
+    if (p.category === curCat) renderStickers();
   } else if (p.type === "history") {
     more.disabled = p.code === "no_more";
     more.textContent = p.code === "no_more" ? "沒有更早的訊息了" : MORE_TEXT;
@@ -303,6 +356,94 @@ function uploadAndSend(file) {
   };
   xhr.onerror = () => { if (pending && pending.id === id) settle("上傳失敗，請檢查網路。", false); };
   xhr.send(file);
+}
+
+function renderCats() {
+  stCats.replaceChildren(...stickerCats.map((name) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = name;
+    b.setAttribute("aria-pressed", String(name === curCat));
+    b.addEventListener("click", () => pickCategory(name));
+    return b;
+  }));
+}
+
+function renderStickers() {
+  const c = stickerCache.get(curCat);
+  const nodes = [];
+  for (const it of c ? c.items : []) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("aria-label", curCat + " 第 " + it.n + " 張");
+    b.setAttribute("aria-pressed", String(!!picked && picked.cat === curCat && picked.n === it.n));
+    const img = new Image();
+    img.src = it.img;
+    img.alt = "";
+    b.append(img);
+    b.addEventListener("click", () => {
+      picked = { cat: curCat, n: it.n };
+      stSend.disabled = false;
+      for (const x of stGrid.querySelectorAll("button[aria-pressed]")) x.setAttribute("aria-pressed", String(x === b));
+    });
+    nodes.push(b);
+  }
+  if (stLoading) {
+    const p = document.createElement("p"); p.textContent = "讀取中…"; nodes.push(p);
+  } else if (c && c.error) {
+    const p = document.createElement("p"); p.textContent = c.error; nodes.push(p);
+  } else if (c && c.more) {
+    const m = document.createElement("button");
+    m.id = "st-more"; m.type = "button"; m.textContent = "更多";
+    m.addEventListener("click", () => requestStickers(curCat, c.page + 1));
+    nodes.push(m);
+  }
+  stGrid.replaceChildren(...nodes);
+}
+
+function requestStickers(name, page) {
+  if (!ws || stLoading) return;
+  stLoading = true;
+  renderStickers();
+  ws.send(JSON.stringify({ type: "stickers", category: name, page }));
+}
+
+function pickCategory(name) {
+  curCat = name;
+  renderCats();
+  stGrid.scrollTop = 0;
+  if (stickerCache.has(name)) renderStickers();
+  else requestStickers(name, 0);
+}
+
+stickerBtn.addEventListener("click", () => {
+  if (stickerBtn.disabled || !ws) return;
+  stickerDlg.showModal();
+  if (!stickerCats.length) {
+    stLoading = true;
+    renderStickers();
+    ws.send(JSON.stringify({ type: "sticker_categories" }));
+  }
+});
+$("st-close").addEventListener("click", () => stickerDlg.close());
+stSend.addEventListener("click", () => {
+  if (!picked || !ws || pending || blocked) return;
+  const id = ++seq;
+  pending = { id, kind: "sticker", timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 90000) };
+  refreshSend();
+  stickerDlg.close();
+  showNotice("貼圖送出中…", true);
+  ws.send(JSON.stringify({ type: "send_sticker", category: picked.cat, n: picked.n, id }));
+  picked = null;
+  stSend.disabled = true;
+  renderStickers();
+});
+if (!("closedBy" in HTMLDialogElement.prototype)) {
+  // 不支援 closedby 的瀏覽器：點面板外面也能關閉
+  const outside = (e) => { const r = stickerDlg.getBoundingClientRect(); return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom; };
+  let downOutside = false;
+  stickerDlg.addEventListener("pointerdown", (e) => { downOutside = outside(e); });
+  stickerDlg.addEventListener("pointerup", (e) => { if (downOutside && outside(e)) stickerDlg.close(); });
 }
 
 attachBtn.addEventListener("click", () => fileInput.click());
@@ -371,6 +512,8 @@ $("reset").addEventListener("click", () => {
   retry = 0; everOpened = false; blocked = null;
   render([]);
   media.clear();
+  stickerCats = []; stickerCache.clear(); curCat = null; picked = null; stLoading = false;
+  if (stickerDlg.open) stickerDlg.close();
   more.disabled = false;
   more.textContent = MORE_TEXT;
   $("target").textContent = "";
