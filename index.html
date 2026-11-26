@@ -138,6 +138,17 @@ body[data-view="list"] #paste-bar { display: none; }
 #fwd .chat-row { color: var(--ink); font-weight: 400; border-radius: 0; }
 #fwd-empty { margin: 24px 18px; text-align: center; color: var(--dim); font-size: 15px; }
 #fwd-cancel { flex: none; width: auto; margin: 10px 12px; margin-bottom: max(10px, env(safe-area-inset-bottom)); background: none; color: var(--ink); border: 1px solid var(--line); font-weight: 400; }
+/* 圖片檢視器：全螢幕黑底，圖片 contain；放大時可捲動 */
+.msg.media:has(img) { cursor: zoom-in; }
+#viewer:modal { width: 100vw; max-width: 100vw; height: 100dvh; max-height: 100dvh; margin: 0; padding: 0; border-radius: 0; background: #000; color: #fff; overflow: hidden; }
+#viewer::backdrop { background: #000; }
+#viewer-scroll { position: absolute; inset: 0; overflow: auto; overscroll-behavior: contain; touch-action: pinch-zoom; }
+#viewer-scroll.zoomed { touch-action: pan-x pan-y pinch-zoom; }
+#viewer-img { display: block; width: 100%; height: 100%; object-fit: contain; -webkit-user-select: none; user-select: none; }
+#viewer-scroll.zoomed #viewer-img { width: 200%; height: 200%; }
+#viewer-x { position: fixed; z-index: 2; top: max(8px, env(safe-area-inset-top)); inset-inline-end: 8px; width: 44px; height: 44px; min-height: 44px; padding: 0; border: 0; border-radius: 50%; background: rgb(0 0 0 / .55); color: #fff; font-size: 20px; font-weight: 400; }
+#viewer-cap { position: fixed; z-index: 2; left: 50%; bottom: max(16px, env(safe-area-inset-bottom)); transform: translateX(-50%); margin: 0; padding: 4px 14px; border-radius: 16px; background: rgb(0 0 0 / .6); color: #ddd; font-size: 13px; line-height: 1.5; white-space: nowrap; pointer-events: none; }
+#viewer-cap[hidden] { display: none; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 /* 即時回饋：樂觀氣泡、開啟中、按下效果 */
 #pending-list { display: flex; flex-direction: column; gap: 8px; }
@@ -235,6 +246,12 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
   <button id="fwd-cancel" type="button">取消</button>
 </dialog>
 
+<dialog id="viewer" aria-label="檢視圖片" closedby="any">
+  <div id="viewer-scroll"><img id="viewer-img" alt="圖片" draggable="false"></div>
+  <button id="viewer-x" type="button" aria-label="關閉">✕</button>
+  <p id="viewer-cap" role="status" hidden></p>
+</dialog>
+
 <dialog id="setup" aria-labelledby="setup-title" closedby="none">
   <form id="setup-form">
     <h1 id="setup-title">連線設定</h1>
@@ -250,7 +267,7 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
 
 <script>
 "use strict";
-const KEY_URL = "sline.url", KEY_PIN = "sline.pin";
+const KEY_URL = "sline.url", KEY_PIN = "sline.pin", KEY_CHATS = "sline.chats";
 const STATUS = { connecting: "連線中", open: "已連線", closed: "斷線，自動重連中" };
 const $ = (id) => document.getElementById(id);
 const log = $("log"), list = $("list"), more = $("more"), text = $("text"), sendBtn = $("send"), notice = $("notice"), setup = $("setup");
@@ -353,8 +370,8 @@ function renderChats() {
     const unread = Number(c.unread) || 0;
     const count = document.createElement("div"); count.className = "cr-unread";
     count.dataset.has = String(unread > 0);
-    count.textContent = busy ? "開啟中…" : (unread > 0 ? unread.toLocaleString() + " 則未讀" : "沒有未讀");
-    const last = document.createElement("div"); last.className = "cr-last"; last.textContent = c.last || "（沒有讀到最後一則訊息）";
+    count.textContent = busy ? "開啟中…" : c.stale ? "更新中…" : (unread > 0 ? unread.toLocaleString() + " 則未讀" : "沒有未讀");
+    const last = document.createElement("div"); last.className = "cr-last"; last.textContent = c.stale ? "" : (c.last || "（沒有讀到最後一則訊息）");
     main.append(name, count, last);
     const side = document.createElement("div"); side.className = "cr-side";
     const time = document.createElement("span"); time.className = "cr-time"; time.textContent = c.time || "";
@@ -394,6 +411,7 @@ function clearChatState() {
   text.value = "";
   picked = null; stSend.disabled = true;
   if (stickerDlg.open) stickerDlg.close();
+  closeViewer();
   showNotice("");
 }
 
@@ -494,6 +512,26 @@ function dropConfirmedOptimistic() {
   }
 }
 
+// ---- 聊天列表名稱快取（只存名稱，不存訊息／未讀／時間）----
+function saveChatNames(items) {
+  try { localStorage.setItem(KEY_CHATS, JSON.stringify(items.map((c) => ({ name: c.name, label: c.label || "" })))); } catch {}
+}
+function loadChatNames() {
+  try {
+    const a = JSON.parse(localStorage.getItem(KEY_CHATS) || "[]");
+    return Array.isArray(a) ? a.filter((c) => c && typeof c.name === "string" && c.name).map((c) => ({ name: c.name, label: typeof c.label === "string" ? c.label : "" })) : [];
+  } catch { return []; }
+}
+// 載入頁面時先用快取名稱畫出列表（標示為更新中），WebSocket 連上後由真正的 chats 封包取代
+function showCachedChats() {
+  if (!localStorage.getItem(KEY_URL) || !localStorage.getItem(KEY_PIN)) return;
+  const names = loadChatNames();
+  if (!names.length) return;
+  chatItems = names.map((c) => ({ ...c, stale: true }));
+  chatsLoaded = true;
+  renderChats();
+}
+
 function toWsBase(raw) {
   let s = raw.trim();
   if (!/^[a-z][a-z0-9+.-]*:\/\//i.test(s)) s = "https://" + s;
@@ -518,6 +556,7 @@ function connect() {
     if (openingName || closing || chatOpening) abortOpen("");
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
     if (stLoading) { stLoading = false; renderStickers(); }
+    if (viewReq) finishView("顯示的是縮圖");
     setState("closed");
     retry++;
     if (!everOpened && retry >= 3) showNotice("連不上後端，請確認 Tunnel 網址與 PIN，或按「重設連線」。");
@@ -537,6 +576,7 @@ function handle(p) {
   } else if (p.type === "chats") {
     chatItems = Array.isArray(p.items) ? p.items : [];
     chatsLoaded = true;
+    if (p.code === "ok") saveChatNames(chatItems);
     renderChats();
     if (!curTarget) {
       const msg = p.code === "off_list" ? "雲端 LINE 不在聊天列表畫面。" : p.code === "device_error" ? "無法連上 Android 容器。" : "";
@@ -551,6 +591,8 @@ function handle(p) {
     if (!p.ok) abortOpen(p.message || "無法開啟聊天室。");
   } else if (p.type === "sync") {
     if (curTarget && !chatOpening) { render(p.messages); dropConfirmedOptimistic(); refreshSelBar(); }
+  } else if (p.type === "view") {
+    onViewReply(p);
   } else if (p.type === "media") {
     media.set(p.id, p.data);
     for (const el of list.querySelectorAll("[data-media]")) if (el.dataset.media === p.id) fillMedia(el);
@@ -966,7 +1008,9 @@ msgMenu.addEventListener("keydown", (ev) => {
   if (btns[n]) btns[n].focus();
 });
 document.addEventListener("keydown", (ev) => { if (ev.key === "Escape" && menuEl) { ev.preventDefault(); closeMenu(); } });
-document.addEventListener("pointerdown", (ev) => { if (menuEl && !msgMenu.contains(ev.target)) closeMenu(); }, true);
+// noTap：這次按下是長按已開選單，或按下時選單本來就開著 → 後面的 click 不算點擊
+let noTap = false;
+document.addEventListener("pointerdown", (ev) => { noTap = !!menuEl; if (menuEl && !msgMenu.contains(ev.target)) closeMenu(); }, true);
 addEventListener("resize", closeMenu);
 
 // 長按偵測
@@ -983,7 +1027,7 @@ list.addEventListener("pointerdown", (ev) => {
   cancelPress();
   const x = ev.clientX, y = ev.clientY;
   el.classList.add("pressing");
-  lp = { el, x, y, timer: setTimeout(() => { cancelPress(); openMenu(el, x, y); }, LONG_PRESS_MS) };
+  lp = { el, x, y, timer: setTimeout(() => { cancelPress(); noTap = true; openMenu(el, x, y); }, LONG_PRESS_MS) };
 });
 list.addEventListener("pointermove", (ev) => {
   if (lp && Math.hypot(ev.clientX - lp.x, ev.clientY - lp.y) > 10) cancelPress();
@@ -1004,10 +1048,72 @@ list.addEventListener("keydown", (ev) => {
   }
 });
 list.addEventListener("click", (ev) => {
-  if (!selecting) return;
   const el = ev.target.closest(".msg");
-  if (el) toggleSel(el);
+  if (!el) return;
+  if (selecting) return toggleSel(el);
+  if (noTap || forwarding || !el.classList.contains("media") || !el.querySelector("img")) return;
+  openViewer(el);
 });
+
+// ---- 圖片檢視器：先秀縮圖，同時向後端要較清楚的版本（不走 pending/ack，不擋傳送）----
+const viewer = $("viewer"), viewerScroll = $("viewer-scroll"), viewerImg = $("viewer-img"), viewerCap = $("viewer-cap");
+const VIEW_TIMEOUT = 30000;
+let viewReq = null;   // { id, timer }：目前檢視器等待中的請求
+let lastTap = 0;
+function setViewCap(message) {
+  viewerCap.textContent = message || "";
+  viewerCap.hidden = !message;
+}
+function finishView(caption) {
+  if (viewReq) clearTimeout(viewReq.timer);
+  viewReq = null;
+  setViewCap(caption);
+}
+function setZoom(on, x, y) {
+  const fx = (viewerScroll.scrollLeft + x) / viewerScroll.scrollWidth, fy = (viewerScroll.scrollTop + y) / viewerScroll.scrollHeight;
+  viewerScroll.classList.toggle("zoomed", on);
+  if (on) { viewerScroll.scrollLeft = fx * viewerScroll.scrollWidth - x; viewerScroll.scrollTop = fy * viewerScroll.scrollHeight - y; }
+}
+function openViewer(el) {
+  const img = el.querySelector("img");
+  if (!img || !img.src) return;
+  closeMenu();
+  viewerImg.src = img.src;
+  viewerScroll.classList.remove("zoomed");
+  finishView("");
+  if (!viewer.open) viewer.showModal();
+  if (!ws || document.body.dataset.state !== "open" || !curTarget || el.dataset.index == null) return setViewCap("顯示的是縮圖");
+  const id = ++seq;
+  viewReq = { id, timer: setTimeout(() => { if (viewReq && viewReq.id === id) finishView(""); }, VIEW_TIMEOUT) };
+  setViewCap("載入原圖中…");
+  ws.send(JSON.stringify({ type: "view", index: Number(el.dataset.index), id }));
+}
+function onViewReply(p) {
+  if (!viewReq || p.id !== viewReq.id || !viewer.open) return;
+  if (p.ok && typeof p.data === "string" && p.data.startsWith("data:image/")) { viewerImg.src = p.data; finishView(""); }
+  else finishView("顯示的是縮圖");
+}
+function closeViewer() {
+  finishView("");
+  if (viewer.open) viewer.close();
+}
+viewer.addEventListener("close", () => { finishView(""); viewerImg.removeAttribute("src"); viewerScroll.classList.remove("zoomed"); });
+$("viewer-x").addEventListener("click", closeViewer);
+// 點圖片以外的黑色區域關閉；雙擊圖片切換 2 倍放大
+viewerScroll.addEventListener("click", (ev) => {
+  const zoomed = viewerScroll.classList.contains("zoomed");
+  if (!zoomed && !onImage(ev)) return closeViewer();
+  const now = Date.now();
+  if (now - lastTap < 300) { lastTap = 0; setZoom(!zoomed, ev.clientX, ev.clientY); } else lastTap = now;
+});
+// 圖片用 contain 排版，判斷點擊是否落在實際畫出的圖片範圍內
+function onImage(ev) {
+  const r = viewerImg.getBoundingClientRect(), nw = viewerImg.naturalWidth, nh = viewerImg.naturalHeight;
+  if (!nw || !nh) return true;
+  const k = Math.min(r.width / nw, r.height / nh), w = nw * k, h = nh * k;
+  const l = r.left + (r.width - w) / 2, t = r.top + (r.height - h) / 2;
+  return ev.clientX >= l && ev.clientX <= l + w && ev.clientY >= t && ev.clientY <= t + h;
+}
 
 // ---- 多選 ----
 function checkedEls() { return [...list.querySelectorAll(".msg.checked")]; }   // DOM 順序 = 原始順序
@@ -1170,6 +1276,7 @@ $("reset").addEventListener("click", () => {
   if (ws) { ws.close(); ws = null; }
   localStorage.removeItem(KEY_URL);
   localStorage.removeItem(KEY_PIN);
+  try { localStorage.removeItem(KEY_CHATS); } catch {}
   retry = 0; everOpened = false; blocked = null;
   render([]);
   media.clear();
@@ -1191,6 +1298,7 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && !ws && !stopped) { retry = 0; connect(); }
 });
 
+showCachedChats();
 connect();
 </script>
 </body>
