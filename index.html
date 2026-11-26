@@ -51,12 +51,14 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #st-cats { display: flex; gap: 6px; overflow-x: auto; padding: 12px 12px 8px; flex: none; scrollbar-width: none; }
 #st-cats button { flex: none; width: auto; min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 17px; background: none; color: var(--ink); font-weight: 400; font-size: 14px; }
 #st-cats button[aria-pressed="true"] { background: var(--ink); color: var(--bar); border-color: var(--ink); }
-#st-grid { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 4px 12px; align-content: start; }
-#st-grid button { width: auto; min-height: 0; padding: 4px; border: 2px solid transparent; border-radius: 12px; background: #fff; overflow: hidden; }
+#st-grid { flex: 1; min-height: 0; overflow-y: scroll; -webkit-overflow-scrolling: touch; touch-action: pan-y; scrollbar-width: thin; scrollbar-color: var(--dim) transparent; overscroll-behavior: contain; display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 4px 12px; align-content: start; grid-auto-rows: max-content; }  /* 列高不可被壓縮，超出就捲動 */
+#st-grid::-webkit-scrollbar { width: 6px; }
+#st-grid::-webkit-scrollbar-thumb { background: var(--dim); border-radius: 3px; }
+#st-grid button { touch-action: pan-y; aspect-ratio: 1; width: auto; min-height: 0; padding: 4px; border: 2px solid transparent; border-radius: 12px; background: #fff; overflow: hidden; }
 #st-grid button[aria-pressed="true"] { border-color: var(--accent); }
 #st-grid img { display: block; width: 100%; height: auto; aspect-ratio: 1; object-fit: contain; }
 #st-grid p { grid-column: 1 / -1; text-align: center; color: var(--dim); font-size: 14px; margin: 24px 0; }
-#st-more { grid-column: 1 / -1; width: auto; min-height: 36px; margin: 6px auto 10px; padding: 0 16px; border: 1px solid var(--line); border-radius: 18px; background: none; color: var(--dim); font-weight: 400; font-size: 13px; }
+#st-more { grid-column: 1 / -1; aspect-ratio: auto !important; width: auto; min-height: 36px; margin: 6px auto 10px; padding: 0 16px; border: 1px solid var(--line); border-radius: 18px; background: none; color: var(--dim); font-weight: 400; font-size: 13px; }
 #st-bar { display: flex; gap: 8px; padding: 10px 12px; padding-bottom: max(10px, env(safe-area-inset-bottom)); border-top: 1px solid var(--line); flex: none; }
 #st-bar button { min-height: 44px; border-radius: 22px; }
 #st-close { width: 44px; flex: none; background: none; color: var(--dim); border: 1px solid var(--line); font-weight: 400; }
@@ -305,7 +307,7 @@ const media = new Map();   // 圖片 id → data URL，只存在這個分頁的�
 const attachBtn = $("attach"), fileInput = $("file");
 const MAX_UPLOAD = 95_000_000;
 const stickerBtn = $("sticker"), stickerDlg = $("stickers"), stCats = $("st-cats"), stGrid = $("st-grid"), stSend = $("st-send");
-let stickerCats = [], curCat = null, picked = null, stLoading = false;
+let stickerCats = [], curCat = null, picked = null, stLoading = false, stShownCat = null;
 const stickerCache = new Map();   // 分類 → { items: [{n, img}], more, page }
 
 let ws = null, retry = 0, retryTimer = 0, everOpened = false, stopped = true;
@@ -635,6 +637,7 @@ function handle(p) {
   } else if (p.type === "stickers") {
     stLoading = false;
     const c = stickerCache.get(p.category) || { items: [], more: true, page: -1 };
+    const hadCount = c.items.length;
     if (p.code === "ok") {
       const have = new Set(c.items.map((i) => i.n));
       c.items.push(...p.items.filter((i) => !have.has(i.n)));
@@ -645,7 +648,12 @@ function handle(p) {
       c.error = p.code === "device_error" ? "無法連上 Android 容器。" : "讀不到這個分類的貼圖。";
     }
     stickerCache.set(p.category, c);
-    if (p.category === curCat) renderStickers();
+    if (p.category === curCat) {
+      renderStickers();
+      // 載入下一頁後，把第一張新貼圖捲到看得到的位置
+      const first = hadCount > 0 && c.items.length > hadCount ? stGrid.children[hadCount] : null;
+      if (first) first.scrollIntoView({ block: "start", behavior: "smooth" });
+    }
   } else if (p.type === "history") {
     more.disabled = p.code === "no_more";
     more.textContent = p.code === "no_more" ? "沒有更早的訊息了" : MORE_TEXT;
@@ -776,14 +784,26 @@ function renderStickers() {
     m.addEventListener("click", () => requestStickers(curCat, c.page + 1));
     nodes.push(m);
   }
+  // 重畫時保留捲動位置（換分類才回到最上面），否則按「更多」後會跳回頂端、看不到新載入的貼圖
+  const top = stShownCat === curCat ? stGrid.scrollTop : 0;
   stGrid.replaceChildren(...nodes);
+  stGrid.scrollTop = top;
+  stShownCat = curCat;
 }
 
 function requestStickers(name, page) {
   if (!ws || stLoading) return;
   stLoading = true;
   renderStickers();
+  if (page > 0) stGrid.scrollTop = stGrid.scrollHeight;   // 讓「讀取中…」看得到
   ws.send(JSON.stringify({ type: "stickers", category: name, page }));
+}
+
+// 滑到接近底部就自動載入下一頁，不一定要按「更多」
+function onStickerScroll() {
+  const c = stickerCache.get(curCat);
+  if (!c || !c.more || c.error || stLoading) return;
+  if (stGrid.scrollTop + stGrid.clientHeight >= stGrid.scrollHeight - 120) requestStickers(curCat, c.page + 1);
 }
 
 function pickCategory(name) {
@@ -804,6 +824,7 @@ stickerBtn.addEventListener("click", () => {
   }
 });
 $("st-close").addEventListener("click", () => stickerDlg.close());
+stGrid.addEventListener("scroll", onStickerScroll, { passive: true });
 stSend.addEventListener("click", () => {
   if (!picked || !ws || pending || blocked) return;
   const id = ++seq;
