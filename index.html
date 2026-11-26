@@ -91,6 +91,8 @@ body[data-view="list"] #back, body[data-view="list"] #log, body[data-view="list"
 }
 .msg.left { align-self: flex-start; background: var(--theirs); border-top-left-radius: 4px; }
 .msg.right { align-self: flex-end; background: var(--mine); color: var(--mine-ink); border-top-right-radius: 4px; }
+/* LINE 的系統訊息（「您已收回訊息」等）：置中的小灰字，不能長按 */
+.msg.center { align-self: center; max-width: 90%; padding: 2px 12px; background: rgb(0 0 0 / .08); color: var(--dim); font-size: 13px; box-shadow: none; border-radius: 12px; }
 .msg.media { padding: 0; overflow: hidden; background: var(--line); box-shadow: none; border-radius: 12px; }
 .msg.media img { display: block; width: 100%; height: 100%; object-fit: cover; }
 #composer {
@@ -137,6 +139,34 @@ body[data-view="list"] #paste-bar { display: none; }
 #fwd-empty { margin: 24px 18px; text-align: center; color: var(--dim); font-size: 15px; }
 #fwd-cancel { flex: none; width: auto; margin: 10px 12px; margin-bottom: max(10px, env(safe-area-inset-bottom)); background: none; color: var(--ink); border: 1px solid var(--line); font-weight: 400; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+/* 即時回饋：樂觀氣泡、開啟中、按下效果 */
+#pending-list { display: flex; flex-direction: column; gap: 8px; }
+#pending-list:not(:empty) { margin-top: 8px; }
+.msg.sending { opacity: .6; }
+#opening { display: none; margin: 40px 0; text-align: center; color: var(--dim); font-size: 15px; }
+body[data-opening="true"] #opening { display: block; }
+body[data-opening="true"] #more { display: none; }
+#msg-menu button[hidden] { display: none; }
+/* 多選模式：底部列取代輸入列，氣泡前面出現勾選圈 */
+#sel-bar { display: none; align-items: center; gap: 8px; padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: var(--bar); border-top: 1px solid var(--line); }
+body[data-select="true"] #sel-bar { display: flex; }
+body[data-select="true"] #composer, body[data-select="true"] #paste-bar { display: none; }
+#sel-count { flex: 1; min-width: 0; font-weight: 600; }
+#sel-bar button { min-height: 44px; min-width: 64px; padding: 0 16px; border: 1px solid var(--line); border-radius: 22px; background: none; color: var(--ink); }
+#sel-bar #sel-fwd { border: 0; background: var(--accent); color: #fff; font-weight: 600; }
+#sel-bar button:disabled { opacity: .45; cursor: default; }
+body[data-select="true"] .msg { position: relative; cursor: pointer; -webkit-user-select: none; user-select: none; }
+body[data-select="true"] .msg:not(.media) { padding-inline-start: 38px; }
+body[data-select="true"] .msg::after { content: ""; position: absolute; top: 6px; inset-inline-start: 6px; width: 22px; height: 22px; box-sizing: border-box; border: 2px solid var(--dim); border-radius: 50%; background: var(--bar); }
+body[data-select="true"] .msg.checked { outline: 2px solid var(--accent); outline-offset: 2px; }
+body[data-select="true"] .msg.checked::after { content: "✓"; display: grid; place-items: center; border-color: var(--accent); background: var(--accent); color: #fff; font-size: 14px; line-height: 1; }
+/* 去除 300 ms 點擊延遲，並加上按下的視覺回饋 */
+button, a, input, textarea, label, .msg, .chat-row { touch-action: manipulation; -webkit-tap-highlight-color: transparent; }
+button { transition: transform .06s ease-out, background-color .06s; }
+button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
+.chat-row:active:not(:disabled) { transform: none; background: var(--bg); filter: none; }
+#msg-menu button:active:not(:disabled) { transform: none; background: var(--line); filter: none; }
+.msg:active { filter: brightness(.95); }
 </style>
 </head>
 <body data-state="connecting" data-view="list">
@@ -156,6 +186,8 @@ body[data-view="list"] #paste-bar { display: none; }
 <main id="log">
   <button id="more" type="button">載入更早訊息</button>
   <div id="list" aria-live="polite"></div>
+  <div id="pending-list" aria-hidden="true"></div>
+  <p id="opening" role="status">開啟中…</p>
 </main>
 <div id="paste-bar" hidden>
   <button id="paste-chip" type="button"></button>
@@ -173,6 +205,11 @@ body[data-view="list"] #paste-bar { display: none; }
   <textarea id="text" rows="1" maxlength="1000" enterkeyhint="send" autocomplete="off"></textarea>
   <button id="send" type="submit" disabled>傳送</button>
 </form>
+<div id="sel-bar">
+  <span id="sel-count" role="status">已選 0 則</span>
+  <button id="sel-fwd" type="button" disabled>轉傳</button>
+  <button id="sel-cancel" type="button">取消</button>
+</div>
 
 <dialog id="stickers" aria-label="LINE 貼圖" closedby="any">
   <div id="st-cats" role="toolbar" aria-label="分類"></div>
@@ -186,6 +223,8 @@ body[data-view="list"] #paste-bar { display: none; }
 <div id="msg-menu" role="menu" aria-label="訊息操作" hidden>
   <button type="button" role="menuitem" data-act="copy">複製</button>
   <button type="button" role="menuitem" data-act="fwd">轉傳</button>
+  <button type="button" role="menuitem" data-act="select">選取</button>
+  <button type="button" role="menuitem" data-act="unsend" hidden>收回</button>
   <button type="button" role="menuitem" data-act="cancel">取消</button>
 </div>
 
@@ -241,14 +280,26 @@ const waiters = [];      // handle() 最前面檢查：{ match(p), resolve, reje
 
 function setState(state) {
   document.body.dataset.state = state;
-  $("status").textContent = STATUS[state];
+  updateStatus();
   refreshSend();
 }
+// 狀態文字：開啟聊天室途中顯示「開啟中…」
+function updateStatus() {
+  const s = document.body.dataset.state;
+  if (STATUS[s]) $("status").textContent = chatOpening && s === "open" ? "開啟中…" : STATUS[s];
+}
+function setOpening(on) {
+  chatOpening = on;
+  document.body.dataset.opening = String(on);
+  updateStatus();
+}
 function refreshSend() {
-  const busy = document.body.dataset.state !== "open" || !curTarget || !!pending || !!blocked;
-  sendBtn.disabled = busy || !text.value.trim();
+  const busy = document.body.dataset.state !== "open" || !curTarget || !!pending || !!blocked || chatOpening;
+  sendBtn.disabled = busy || forwarding || !text.value.trim();
+  text.disabled = chatOpening;
   attachBtn.disabled = busy;
-  stickerBtn.disabled = busy;
+  stickerBtn.disabled = busy || forwarding;
+  refreshSelBar();
   refreshPaste();
   refreshList();
 }
@@ -262,17 +313,22 @@ let openingName = null;    // 正在開啟的列 key
 let closing = false;       // 已送出 close，等 chat 封包
 let listNotice = false;    // 目前的提示是列表產生的
 let navTimer = 0;
+let chatOpening = false;   // 已先切到聊天室畫面，還在等後端確認開啟
 const NAV_TIMEOUT = 60000;
 
 function startNav() {
   clearTimeout(navTimer);
-  navTimer = setTimeout(() => {
-    openingName = null; closing = false;
-    renderChats();
-    showNotice("後端沒有回應，請再試一次。");
-  }, NAV_TIMEOUT);
+  navTimer = setTimeout(() => abortOpen("後端沒有回應，請再試一次。"), NAV_TIMEOUT);
 }
-function endNav() { clearTimeout(navTimer); openingName = null; closing = false; }
+function endNav() { clearTimeout(navTimer); openingName = null; closing = false; if (chatOpening) setOpening(false); }
+// 開啟失敗／逾時／斷線：退回列表畫面並提示
+function abortOpen(message) {
+  const was = chatOpening;
+  endNav();
+  if (was) setChat(null);
+  renderChats();
+  if (message) { showNotice(message); listNotice = false; }
+}
 
 function refreshList() {
   const open = document.body.dataset.state === "open";
@@ -304,7 +360,7 @@ function renderChats() {
     const time = document.createElement("span"); time.className = "cr-time"; time.textContent = c.time || "";
     side.append(time);
     b.append(main, side);
-    b.addEventListener("click", () => openChat(c.name));
+    b.addEventListener("click", () => openChat(c.name, c.label || c.name));
     li.append(b);
     return li;
   }));
@@ -313,17 +369,22 @@ function renderChats() {
   refreshList();
 }
 
-function openChat(name) {
+function openChat(name, label) {
   if (!ws || openingName || forwarding || document.body.dataset.state !== "open") return;
-  openingName = name;
   showNotice("");
+  setChat(name, label || name, true);   // 立刻切到聊天室畫面，不等後端
+  openingName = name;
+  setOpening(true);
   startNav();
   renderChats();
+  refreshSend();
   ws.send(JSON.stringify({ type: "open", name }));
 }
 
 function clearChatState() {
   closeMenu();
+  exitSelect();
+  clearOptimistic();
   render([]);
   media.clear();
   more.disabled = false;
@@ -368,7 +429,7 @@ function fillMedia(el) {
 
 function bubble(m) {
   const el = document.createElement("div");
-  el.className = "msg " + (m.side === "right" ? "right" : "left");
+  el.className = "msg " + (m.side === "right" ? "right" : m.side === "center" ? "center" : "left");
   if (m.kind === "media") {
     // Android 畫面 720px 寬、2 倍密度：除以 2 即為實際顯示大小；圖片未到前先保留同樣大小的空位
     el.classList.add("media");
@@ -394,6 +455,7 @@ function render(messages) {
     list.prepend(frag);
     log.scrollTop = log.scrollHeight - fromBottom;
     shown = messages;
+    reindex();
     return;
   }
   let keep = 0;
@@ -402,7 +464,34 @@ function render(messages) {
   for (const m of messages.slice(keep)) list.append(bubble(m));
   const grew = messages.length > keep;
   shown = messages;
+  reindex();
   if (grew) log.scrollTop = log.scrollHeight;
+}
+// 每次 render 後重算 data-index（往上補舊訊息時索引會位移），收回時要用
+function reindex() {
+  let i = 0;
+  for (const el of list.children) el.dataset.index = String(i++);
+}
+
+// ---- 樂觀氣泡（送出中的文字）----
+const pendingList = $("pending-list");
+function addOptimistic(value) {
+  const el = document.createElement("div");
+  el.className = "msg right sending";
+  el.textContent = value;
+  pendingList.append(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+function clearOptimistic() { pendingList.replaceChildren(); }
+// 移除已經出現在真正對話裡的樂觀氣泡。後端是先廣播 sync 再回 ack，所以兩個時間點都要檢查：
+// 已確認（done）的，或同樣文字已出現在最後幾則自己的訊息裡的，都拿掉。
+function dropConfirmedOptimistic() {
+  const recent = shown.slice(-15).filter((m) => m.side === "right" && (m.kind || "text") === "text").map((m) => m.text);
+  for (const el of [...pendingList.children]) {
+    const i = recent.lastIndexOf(el.textContent);
+    if (el.dataset.done && i >= 0) { el.remove(); recent.splice(i, 1); }
+  }
 }
 
 function toWsBase(raw) {
@@ -426,7 +515,7 @@ function connect() {
     ws = null;
     failWaiters("連線中斷，轉傳已中止。");
     if (pending) settle("連線中斷，無法確認上一則是否送達，請看對話再決定是否重傳。", false);
-    if (openingName || closing) { endNav(); renderChats(); }
+    if (openingName || closing || chatOpening) abortOpen("");
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
     if (stLoading) { stLoading = false; renderStickers(); }
     setState("closed");
@@ -455,16 +544,13 @@ function handle(p) {
       else if (listNotice) { showNotice(""); listNotice = false; }
     }
   } else if (p.type === "chat") {
+    // 剛按了聊天室、先前背景 close 的回應才到：忽略，免得把畫面拉回列表
+    if (!p.target && chatOpening) { closing = false; return; }
     setChat(p.target, p.label);
   } else if (p.type === "open_result") {
-    if (!p.ok) {
-      endNav();
-      renderChats();
-      showNotice(p.message || "無法開啟聊天室。");
-      listNotice = false;
-    }
+    if (!p.ok) abortOpen(p.message || "無法開啟聊天室。");
   } else if (p.type === "sync") {
-    if (curTarget) render(p.messages);
+    if (curTarget && !chatOpening) { render(p.messages); dropConfirmedOptimistic(); refreshSelBar(); }
   } else if (p.type === "media") {
     media.set(p.id, p.data);
     for (const el of list.querySelectorAll("[data-media]")) if (el.dataset.media === p.id) fillMedia(el);
@@ -504,21 +590,35 @@ function handle(p) {
   }
 }
 
+// 收到 ack／逾時／斷線：結算目前等待中的那一則。cb(ok, message) 由轉傳流程使用
 function settle(message, ok) {
-  clearTimeout(pending.timer);
-  const wasText = pending.kind === "text", done = pending.done;
+  const p = pending;
+  clearTimeout(p.timer);
   pending = null;
-  if (ok && wasText) text.value = "";
-  if (ok && done) flash(done);
+  if (p.kind === "text" && p.opt) {
+    if (ok) {
+      // 保留樂觀氣泡，等下一次 sync 畫出真訊息；保險起見 4 秒後也移除
+      p.opt.dataset.done = "1";
+      dropConfirmedOptimistic();   // sync 通常已經先到了，真訊息已在畫面上就立刻移除
+      setTimeout(() => p.opt.remove(), 4000);
+    } else {
+      p.opt.remove();
+      if (p.restore && !text.value) text.value = p.restore;   // 失敗：把字放回輸入框
+    }
+  }
+  if (p.cb) p.cb(ok, message);
+  else if (ok && p.kind === "unsend") flash("已收回", 2500);
   else if (!blocked || message) showNotice(message);
   refreshSend();
 }
 
-function sendTextNow(value, done) {
-  if (!ws || !curTarget || pending || blocked || document.body.dataset.state !== "open") return false;
+// cb：轉傳流程的完成回呼；有 cb 時不清輸入框、失敗不還原文字
+function sendTextNow(value, cb) {
+  if (!ws || !curTarget || pending || blocked || chatOpening || document.body.dataset.state !== "open") return false;
   const id = ++seq;
-  pending = { id, kind: "text", done, timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 15000) };
-  if (done) showNotice("轉傳中…", true); else showNotice("");
+  const opt = addOptimistic(value);   // 立刻顯示半透明氣泡
+  pending = { id, kind: "text", cb, opt, restore: cb ? "" : value, timer: setTimeout(() => settle("後端沒有回應，無法確認是否送達，請看對話再決定是否重傳。", false), 15000) };
+  if (!cb) { text.value = ""; showNotice(""); }
   refreshSend();
   ws.send(JSON.stringify({ text: value, id }));
   return true;
@@ -528,11 +628,11 @@ function httpBase() {
   return (localStorage.getItem(KEY_URL) || "").replace(/^wss:/, "https:").replace(/^ws:/, "http:");
 }
 
-function uploadAndSend(file) {
+function uploadAndSend(file, cb) {
   if (attachBtn.disabled || !ws) return;
   if (file.size > MAX_UPLOAD) return showNotice("檔案超過 95 MB，無法傳送。");
   const id = ++seq;
-  pending = { id, kind: "media", timer: 0 };
+  pending = { id, kind: "media", cb, timer: 0 };
   refreshSend();
   showNotice("上傳中 0%", true);
   const xhr = new XMLHttpRequest();
@@ -644,7 +744,7 @@ if (!("closedBy" in HTMLDialogElement.prototype)) {
   stickerDlg.addEventListener("pointerup", (e) => { if (downOutside && outside(e)) stickerDlg.close(); });
 }
 
-attachBtn.addEventListener("click", () => fileInput.click());
+attachBtn.addEventListener("click", () => { if (!forwarding) fileInput.click(); });
 fileInput.addEventListener("change", () => {
   const f = fileInput.files[0];
   fileInput.value = "";
@@ -658,11 +758,11 @@ $("composer").addEventListener("submit", (ev) => {
   sendTextNow(value);
 });
 text.addEventListener("input", refreshSend);
+// 返回：立刻切回列表（顯示快取），close 在背景送出，不等後端
 backBtn.addEventListener("click", () => {
-  if (!ws || closing || forwarding || !curTarget || document.body.dataset.state !== "open") return;
-  closing = true;
-  startNav();
-  refreshList();
+  if (!ws || closing || forwarding || chatOpening || !curTarget || document.body.dataset.state !== "open") return;
+  setChat(null, null, true);
+  closing = true;   // 等背景 close 的 chat 封包回來才解除
   ws.send(JSON.stringify({ type: "close" }));
 });
 refreshBtn.addEventListener("click", () => {
@@ -688,7 +788,9 @@ text.addEventListener("keydown", (ev) => {
 const msgMenu = $("msg-menu"), fwdDlg = $("fwd"), fwdList = $("fwd-list"), fwdEmpty = $("fwd-empty");
 const pasteBar = $("paste-bar"), pasteChip = $("paste-chip");
 const LONG_PRESS_MS = 500, FWD_TIMEOUT = 60000;
-let menuEl = null, menuItem = null, fwdItem = null, lp = null;
+const MAX_SELECT = 20;
+let menuEl = null, menuItem = null, fwdItems = [], lp = null;
+let selecting = false;   // 多選模式
 
 function flash(message, ms = 4000) {
   showNotice(message, true);
@@ -771,11 +873,10 @@ function refreshPaste() {
   pasteChip.textContent = clip.kind === "text" ? "貼上：" + clip.text.replace(/\s+/g, " ").trim().slice(0, 20) : "貼上圖片";
   pasteChip.disabled = clip.kind === "image" && attachBtn.disabled;
 }
-function sendImageFile(file, done) {
-  if (attachBtn.disabled || !ws) return showNotice("目前無法傳送圖片。");
+function sendImageFile(file) {
+  if (attachBtn.disabled || !ws || forwarding) return showNotice("目前無法傳送圖片。");
   if (!confirm("要傳送這張圖片嗎？")) return false;
   uploadAndSend(file);
-  if (done && pending && pending.kind === "media") pending.done = done;
   return true;
 }
 pasteChip.addEventListener("click", () => {
@@ -811,14 +912,16 @@ function menuTargetOf(el) {
   return { kind: "text", text: el.textContent };
 }
 function openMenu(el, x, y) {
-  if (forwarding || menuEl === el) return;
+  if (forwarding || selecting || menuEl === el || el.classList.contains("center")) return;  // 系統訊息不能操作
   const item = menuTargetOf(el);
   if (item.kind === "text" && !item.text) return;
   closeMenu();
   menuEl = el; menuItem = item;
   el.classList.add("sel");
   const missing = item.kind === "image" && !item.dataUrl;
-  for (const b of msgMenu.querySelectorAll("button")) b.disabled = missing && b.dataset.act !== "cancel";
+  // 只有自己的訊息（右側）才能收回
+  msgMenu.querySelector('[data-act="unsend"]').hidden = !el.classList.contains("right");
+  for (const b of msgMenu.querySelectorAll("button")) b.disabled = missing && (b.dataset.act === "copy" || b.dataset.act === "fwd");
   msgMenu.hidden = false;
   const r = el.getBoundingClientRect();
   if (x == null || y == null) { x = r.left + r.width / 2; y = r.top + r.height / 2; }
@@ -843,13 +946,15 @@ function closeMenu() {
 msgMenu.addEventListener("click", (ev) => {
   const b = ev.target.closest("button");
   if (!b || b.disabled || !menuItem) return;
-  const item = menuItem;
+  const item = menuItem, el = menuEl;
   closeMenu();
   if (b.dataset.act === "copy") copyItem(item);
-  else if (b.dataset.act === "fwd") openForwardPicker(item);
+  else if (b.dataset.act === "fwd") openForwardPicker([item]);
+  else if (b.dataset.act === "select") enterSelect(el);
+  else if (b.dataset.act === "unsend") unsendMessage(el);
 });
 msgMenu.addEventListener("keydown", (ev) => {
-  const btns = [...msgMenu.querySelectorAll("button:not(:disabled)")];
+  const btns = [...msgMenu.querySelectorAll("button:not(:disabled):not([hidden])")];
   const i = btns.indexOf(document.activeElement);
   let n = -1;
   if (ev.key === "ArrowDown" || (ev.key === "Tab" && !ev.shiftKey)) n = (i + 1) % btns.length;
@@ -874,7 +979,7 @@ function cancelPress() {
 list.addEventListener("pointerdown", (ev) => {
   if (ev.pointerType === "mouse" && ev.button !== 0) return;
   const el = ev.target.closest(".msg");
-  if (!el || forwarding) return;
+  if (!el || forwarding || selecting) return;
   cancelPress();
   const x = ev.clientX, y = ev.clientY;
   el.classList.add("pressing");
@@ -895,14 +1000,66 @@ list.addEventListener("contextmenu", (ev) => {
 list.addEventListener("keydown", (ev) => {
   if ((ev.key === "Enter" || ev.key === " ") && ev.target.classList && ev.target.classList.contains("msg")) {
     ev.preventDefault();
-    openMenu(ev.target);
+    if (selecting) toggleSel(ev.target); else openMenu(ev.target);
   }
 });
+list.addEventListener("click", (ev) => {
+  if (!selecting) return;
+  const el = ev.target.closest(".msg");
+  if (el) toggleSel(el);
+});
+
+// ---- 多選 ----
+function checkedEls() { return [...list.querySelectorAll(".msg.checked")]; }   // DOM 順序 = 原始順序
+function refreshSelBar() {
+  const n = checkedEls().length;
+  $("sel-count").textContent = "已選 " + n + " 則";
+  $("sel-fwd").disabled = n === 0 || forwarding || document.body.dataset.state !== "open";
+}
+function enterSelect(el) {
+  if (forwarding || !el || !el.isConnected) return;
+  selecting = true;
+  document.body.dataset.select = "true";
+  el.classList.add("checked");
+  refreshSelBar();
+}
+function exitSelect() {
+  selecting = false;
+  delete document.body.dataset.select;
+  for (const el of checkedEls()) el.classList.remove("checked");
+  refreshSelBar();
+}
+function toggleSel(el) {
+  if (!el.classList.contains("checked") && checkedEls().length >= MAX_SELECT) return flash("最多一次選 " + MAX_SELECT + " 則。", 2500);
+  el.classList.toggle("checked");
+  refreshSelBar();
+}
+$("sel-cancel").addEventListener("click", exitSelect);
+$("sel-fwd").addEventListener("click", () => {
+  if (forwarding) return;
+  const items = checkedEls().map(menuTargetOf).filter((it) => it.kind === "image" || it.text);
+  if (!items.length) return;
+  if (items.some((it) => it.kind === "image" && !it.dataUrl)) return showNotice("有圖片還沒載入完成，無法轉傳，請稍後再試。");
+  openForwardPicker(items);
+});
+
+// ---- 收回 ----
+function unsendMessage(el) {
+  const index = Number(el.dataset.index), m = shown[index];
+  if (!m || m.side !== "right") return showNotice("找不到這則訊息，無法收回。");
+  if (!ws || !curTarget || pending || blocked || chatOpening || document.body.dataset.state !== "open") return showNotice("目前無法收回，請稍後再試。");
+  if (!confirm("要收回這則訊息嗎？對方那邊也會消失（LINE 只能收回 7 天內的訊息）。")) return;
+  const id = ++seq;
+  pending = { id, kind: "unsend", timer: setTimeout(() => settle("後端沒有回應，無法確認是否已收回，請看對話。", false), 30000) };
+  showNotice("收回中…", true);
+  refreshSend();
+  ws.send(JSON.stringify({ type: "unsend", index, side: "right", text: m.kind === "media" ? "" : (m.text || ""), kind: m.kind === "media" ? "media" : "text", id }));
+}
 
 // 轉傳
-function openForwardPicker(item) {
+function openForwardPicker(items) {
   if (forwarding) return;
-  fwdItem = item;
+  fwdItems = items;
   const rows = chatItems.filter((c) => c.name !== curTarget);
   fwdEmpty.hidden = rows.length > 0;
   fwdList.replaceChildren(...rows.map((c) => {
@@ -914,7 +1071,7 @@ function openForwardPicker(item) {
     const last = document.createElement("div"); last.className = "cr-last"; last.textContent = c.last || "";
     main.append(name, last);
     b.append(main);
-    b.addEventListener("click", () => { const it = fwdItem; fwdDlg.close(); forwardTo(it, c); });
+    b.addEventListener("click", () => { const its = fwdItems; fwdDlg.close(); forwardTo(its, c); });
     li.append(b);
     return li;
   }));
@@ -928,11 +1085,28 @@ if (!("closedBy" in HTMLDialogElement.prototype)) {
   fwdDlg.addEventListener("pointerup", (e) => { if (downOutside && outside(e)) fwdDlg.close(); });
 }
 
-async function forwardTo(item, chat) {
-  if (forwarding) return;
+// 送出一個轉傳項目，等後端 ack 才 resolve；失敗 reject
+function sendForwardItem(item) {
+  return new Promise((resolve, reject) => {
+    const cb = (ok, msg) => (ok ? resolve() : reject(new Error(msg || "傳送失敗。")));
+    if (item.kind === "text") {
+      if (!sendTextNow(item.text, cb)) reject(new Error("目前無法送出（後端忙碌或被鎖定）。"));
+      return;
+    }
+    try {
+      const blob = dataUrlToBlob(item.dataUrl);
+      uploadAndSend(new File([blob], "forward." + (blob.type === "image/png" ? "png" : "jpg"), { type: blob.type }), cb);
+      if (!pending || pending.kind !== "media" || pending.cb !== cb) reject(new Error("圖片沒有送出。"));
+    } catch (e) { reject(e); }
+  });
+}
+
+// items：{kind:"text"|"image", ...} 陣列（依原始順序）；先切到目標聊天室一次，再逐則送出
+async function forwardTo(items, chat) {
+  if (forwarding || !items.length) return;
   if (!ws || document.body.dataset.state !== "open") return showNotice("尚未連線，無法轉傳。");
   if (pending) return showNotice("請等目前的訊息送出後再轉傳。");
-  const name = chat.name, label = chat.label || chat.name;
+  const name = chat.name, label = chat.label || chat.name, n = items.length;
   const end = Date.now() + FWD_TIMEOUT;
   const step = (match, msg) => {
     const p = waitFor(match, end - Date.now());
@@ -941,26 +1115,24 @@ async function forwardTo(item, chat) {
   };
   forwarding = true;
   closeMenu();
+  exitSelect();
   refreshSend();
   showNotice("轉傳中…", true);
+  let sent = 0, sending = false;
   try {
     await step((p) => p.type === "chat" && !p.target, { type: "close" });
     const r = await step((p) => (p.type === "chat" && p.target === name) || (p.type === "open_result" && !p.ok), { type: "open", name });
     if (r.type === "open_result") throw new Error(r.message || "無法開啟聊天室，轉傳已中止。");
     await waitFor((p) => p.type === "sync", end - Date.now());
-    forwarding = false;
-    refreshSend();
-    const done = "已轉傳到 " + label;
-    if (item.kind === "text") {
-      if (!sendTextNow(item.text, done)) throw new Error("已開啟 " + label + "，但目前無法送出（後端忙碌或被鎖定），請用「貼上」手動傳送。");
-    } else {
-      const blob = dataUrlToBlob(item.dataUrl);
-      uploadAndSend(new File([blob], "forward." + (blob.type === "image/png" ? "png" : "jpg"), { type: blob.type }));
-      if (!pending) throw new Error("已開啟 " + label + "，但圖片沒有送出，請用「貼上」手動傳送。");
-      pending.done = done;
+    sending = true;
+    for (; sent < n; sent++) {
+      showNotice("轉傳中 " + (sent + 1) + "/" + n + "…", true);
+      await sendForwardItem(items[sent]);
     }
+    flash(n === 1 ? "已轉傳到 " + label : "已轉傳 " + n + " 則到 " + label);
   } catch (e) {
-    showNotice(e && e.message ? e.message : "轉傳失敗。");
+    const base = e && e.message ? e.message : "轉傳失敗。";
+    showNotice(sending ? "第 " + (sent + 1) + "/" + n + " 則轉傳失敗（已送出 " + sent + " 則到 " + label + "）：" + base : base);
   } finally {
     failWaiters("");
     forwarding = false;
