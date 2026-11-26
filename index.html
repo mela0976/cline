@@ -121,8 +121,14 @@ dialog button { width: 100%; min-height: 46px; border: 0; border-radius: 10px; b
 .msg.pressing, .msg.sel { -webkit-user-select: none; user-select: none; }
 .msg.sel { outline: 2px solid var(--accent); outline-offset: 2px; }
 #paste-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px 0; background: var(--bar); border-top: 1px solid var(--line); }
-#paste-bar[hidden], #msg-menu[hidden] { display: none; }
-body[data-view="list"] #paste-bar { display: none; }
+#paste-bar[hidden], #file-bar[hidden], #msg-menu[hidden] { display: none; }
+body[data-view="list"] #paste-bar, body[data-view="list"] #file-bar { display: none; }
+/* 收到的檔案（📄 開頭的文字氣泡）：檔名加粗、可點擊 */
+.msg.file { cursor: pointer; font-weight: 600; }
+/* 檔案下載連結列：樣式比照貼上列 */
+#file-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px 0; background: var(--bar); border-top: 1px solid var(--line); }
+#file-link { flex: 1; min-width: 0; display: block; line-height: 44px; height: 44px; padding: 0 14px; border: 1px solid var(--accent); border-radius: 22px; background: var(--bg); color: var(--accent-ink); font-size: 15px; font-weight: 600; text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#file-x { flex: none; width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: none; color: var(--dim); font-size: 16px; }
 #paste-chip { flex: 1; min-width: 0; min-height: 44px; padding: 0 14px; border: 1px solid var(--line); border-radius: 22px; background: var(--bg); color: var(--ink); text-align: start; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
 #paste-chip:disabled { opacity: .45; cursor: default; }
 #paste-x { flex: none; width: 44px; min-height: 44px; border: 0; border-radius: 50%; background: none; color: var(--dim); font-size: 16px; }
@@ -161,7 +167,7 @@ body[data-opening="true"] #more { display: none; }
 /* 多選模式：底部列取代輸入列，氣泡前面出現勾選圈 */
 #sel-bar { display: none; align-items: center; gap: 8px; padding: 8px 10px; padding-bottom: max(8px, env(safe-area-inset-bottom)); background: var(--bar); border-top: 1px solid var(--line); }
 body[data-select="true"] #sel-bar { display: flex; }
-body[data-select="true"] #composer, body[data-select="true"] #paste-bar { display: none; }
+body[data-select="true"] #composer, body[data-select="true"] #paste-bar, body[data-select="true"] #file-bar { display: none; }
 #sel-count { flex: 1; min-width: 0; font-weight: 600; }
 #sel-bar button { min-height: 44px; min-width: 64px; padding: 0 16px; border: 1px solid var(--line); border-radius: 22px; background: none; color: var(--ink); }
 #sel-bar #sel-fwd { border: 0; background: var(--accent); color: #fff; font-weight: 600; }
@@ -203,6 +209,10 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
 <div id="paste-bar" hidden>
   <button id="paste-chip" type="button"></button>
   <button id="paste-x" type="button" aria-label="清除剪貼內容">✕</button>
+</div>
+<div id="file-bar" hidden>
+  <a id="file-link" target="_blank" rel="noopener"></a>
+  <button id="file-x" type="button" aria-label="關閉檔案連結">✕</button>
 </div>
 <form id="composer">
   <button id="attach" type="button" aria-label="傳送照片" disabled>
@@ -412,6 +422,7 @@ function clearChatState() {
   picked = null; stSend.disabled = true;
   if (stickerDlg.open) stickerDlg.close();
   closeViewer();
+  clearFileState();
   showNotice("");
 }
 
@@ -456,6 +467,7 @@ function bubble(m) {
     if (m.media) { el.dataset.media = m.media; fillMedia(el); }
   } else {
     el.textContent = m.text;
+    if (m.text.startsWith("📄 ")) el.classList.add("file");   // 收到的檔案：可點擊取得下載連結
   }
   el.tabIndex = 0;
   el.setAttribute("aria-haspopup", "menu");
@@ -557,6 +569,7 @@ function connect() {
     if (more.textContent === "載入中…") { more.disabled = false; more.textContent = MORE_TEXT; }
     if (stLoading) { stLoading = false; renderStickers(); }
     if (viewReq) finishView("顯示的是縮圖");
+    if (fileReq) { clearFileReq(); showNotice("連線中斷，檔案請求已取消。"); }
     setState("closed");
     retry++;
     if (!everOpened && retry >= 3) showNotice("連不上後端，請確認 Tunnel 網址與 PIN，或按「重設連線」。");
@@ -593,6 +606,8 @@ function handle(p) {
     if (curTarget && !chatOpening) { render(p.messages); dropConfirmedOptimistic(); refreshSelBar(); }
   } else if (p.type === "view") {
     onViewReply(p);
+  } else if (p.type === "file") {
+    onFileReply(p);
   } else if (p.type === "media") {
     media.set(p.id, p.data);
     for (const el of list.querySelectorAll("[data-media]")) if (el.dataset.media === p.id) fillMedia(el);
@@ -1051,7 +1066,9 @@ list.addEventListener("click", (ev) => {
   const el = ev.target.closest(".msg");
   if (!el) return;
   if (selecting) return toggleSel(el);
-  if (noTap || forwarding || !el.classList.contains("media") || !el.querySelector("img")) return;
+  if (noTap || forwarding) return;
+  if (el.classList.contains("file")) return requestFile(el);
+  if (!el.classList.contains("media") || !el.querySelector("img")) return;
   openViewer(el);
 });
 
@@ -1114,6 +1131,50 @@ function onImage(ev) {
   const l = r.left + (r.width - w) / 2, t = r.top + (r.height - h) / 2;
   return ev.clientX >= l && ev.clientX <= l + w && ev.clientY >= t && ev.clientY <= t + h;
 }
+
+// ---- 檔案下載：點「📄」氣泡 → 後端備好一次性連結 → 使用者點連結開啟（不走 pending/ack，不擋傳送）----
+const fileBar = $("file-bar"), fileLink = $("file-link");
+const FILE_TIMEOUT = 120000, FILE_LINK_TTL = 10 * 60 * 1000;
+let fileReq = null;     // { id, timer }：等待後端備好檔案的請求（同時只有一個）
+let fileBarTimer = 0;   // 連結 10 分鐘後失效，到時收起
+function formatSize(bytes) {
+  const n = Number(bytes) || 0;
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB";
+}
+function clearFileReq() {
+  if (fileReq) clearTimeout(fileReq.timer);
+  fileReq = null;
+}
+function hideFileBar() {
+  clearTimeout(fileBarTimer);
+  fileBar.hidden = true;
+  fileLink.removeAttribute("href");
+  fileLink.textContent = "";
+}
+function clearFileState() { clearFileReq(); hideFileBar(); }
+function requestFile(el) {
+  if (fileReq || !ws || !curTarget || chatOpening || document.body.dataset.state !== "open" || el.dataset.index == null) return;
+  const id = ++seq;
+  hideFileBar();
+  fileReq = { id, timer: setTimeout(() => { if (fileReq && fileReq.id === id) { clearFileReq(); showNotice("檔案下載逾時，請再試一次。"); } }, FILE_TIMEOUT) };
+  showNotice("檔案下載中…（大檔案可能要等一下）", true);
+  ws.send(JSON.stringify({ type: "file", index: Number(el.dataset.index), id }));
+}
+function onFileReply(p) {
+  if (!fileReq || p.id !== fileReq.id) return;
+  clearFileReq();
+  if (!p.ok || typeof p.url !== "string" || !p.url.startsWith("/")) return showNotice(p.message || "無法取得檔案。");
+  showFileBar(httpBase() + p.url, p.name, p.size);
+}
+function showFileBar(url, name, size) {
+  fileLink.href = url;
+  fileLink.textContent = "開啟 " + (name || "檔案") + "（" + formatSize(size) + "）";
+  fileBar.hidden = false;
+  showNotice("");
+  clearTimeout(fileBarTimer);
+  fileBarTimer = setTimeout(hideFileBar, FILE_LINK_TTL);
+}
+$("file-x").addEventListener("click", hideFileBar);
 
 // ---- 多選 ----
 function checkedEls() { return [...list.querySelectorAll(".msg.checked")]; }   // DOM 順序 = 原始順序
@@ -1288,6 +1349,7 @@ $("reset").addEventListener("click", () => {
   showNotice("");
   chatItems = []; chatsLoaded = false; listNotice = false;
   clip = null; closeMenu();
+  clearFileState();
   setChat(null, null, true);
   $("target").textContent = "聊天";
   refreshSend();
