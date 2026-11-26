@@ -220,7 +220,7 @@ let openingName = null;    // 正在開啟的列 key
 let closing = false;       // 已送出 close，等 chat 封包
 let listNotice = false;    // 目前的提示是列表產生的
 let navTimer = 0;
-const NAV_TIMEOUT = 20000;
+const NAV_TIMEOUT = 60000;
 
 function startNav() {
   clearTimeout(navTimer);
