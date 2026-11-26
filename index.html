@@ -95,6 +95,9 @@ body[data-view="list"] #back, body[data-view="list"] #log, body[data-view="list"
 .msg.center { align-self: center; max-width: 90%; padding: 2px 12px; background: rgb(0 0 0 / .08); color: var(--dim); font-size: 13px; box-shadow: none; border-radius: 12px; }
 .msg.media { padding: 0; overflow: hidden; background: var(--line); box-shadow: none; border-radius: 12px; }
 .msg.media img { display: block; width: 100%; height: 100%; object-fit: cover; }
+/* 影片：縮圖中央疊一個播放鈕 */
+.msg.video { position: relative; cursor: pointer; }
+.msg.video::after { content: ""; position: absolute; inset: 0; margin: auto; width: 56px; height: 56px; border-radius: 50%; background: rgb(0 0 0 / .55) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23fff' d='M9 6.5v11l9-5.500z'/%3E%3C/svg%3E") center / 30px no-repeat; pointer-events: none; }
 #composer {
   display: flex; align-items: flex-end; gap: 8px; padding: 8px 10px;
   padding-bottom: max(8px, env(safe-area-inset-bottom));
@@ -455,7 +458,7 @@ function showNotice(message, info = false) {
   notice.classList.toggle("info", !!message && info);
 }
 
-const same = (a, b) => a.side === b.side && a.text === b.text && (a.kind || "text") === (b.kind || "text") &&
+const same = (a, b) => a.side === b.side && a.text === b.text && (a.kind || "text") === (b.kind || "text") && !!a.video === !!b.video &&
   (a.media || null) === (b.media || null) && a.w === b.w && a.h === b.h;
 
 function fillMedia(el) {
@@ -476,6 +479,7 @@ function bubble(m) {
     el.style.width = Math.round(m.w / 2) + "px";
     el.style.aspectRatio = m.w + " / " + m.h;
     if (m.media) { el.dataset.media = m.media; fillMedia(el); }
+    if (m.video) el.classList.add("video");   // 影片：點了請後端向 LINE 取得 mp4，再用連結播放
   } else {
     el.textContent = m.text;
     if (m.text.startsWith("📄 ")) el.classList.add("file");   // 收到的檔案：可點擊取得下載連結
@@ -1119,7 +1123,7 @@ list.addEventListener("click", (ev) => {
   if (!el) return;
   if (selecting) return toggleSel(el);
   if (noTap || forwarding) return;
-  if (el.classList.contains("file")) return requestFile(el);
+  if (el.classList.contains("file") || el.classList.contains("video")) return requestFile(el);
   if (!el.classList.contains("media") || !el.querySelector("img")) return;
   openViewer(el);
 });
@@ -1209,7 +1213,7 @@ function requestFile(el) {
   const id = ++seq;
   hideFileBar();
   fileReq = { id, timer: setTimeout(() => { if (fileReq && fileReq.id === id) { clearFileReq(); showNotice("檔案下載逾時，請再試一次。"); } }, FILE_TIMEOUT) };
-  showNotice("檔案下載中…（大檔案可能要等一下）", true);
+  showNotice(el.classList.contains("video") ? "影片準備中…（約 10–20 秒，好了會出現播放連結）" : "檔案下載中…（大檔案可能要等一下）", true);
   ws.send(JSON.stringify({ type: "file", index: Number(el.dataset.index), id }));
 }
 function onFileReply(p) {
