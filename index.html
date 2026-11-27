@@ -102,6 +102,10 @@ header { gap: 8px; }
   max-width: 78%; padding: 10px 14px; border-radius: 18px; line-height: 1.55;
   white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgb(0 0 0 / .08);
 }
+/* 回覆：氣泡上方引用被回覆的訊息 */
+.msg .quote { display: flex; flex-direction: column; gap: 1px; margin: -2px -4px 8px; padding: 6px 10px; border-left: 3px solid var(--accent); border-radius: 6px; background: rgb(0 0 0 / .06); font-size: 14px; line-height: 1.4; white-space: normal; }
+.msg .quote b { font-weight: 600; }
+.msg .quote span { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; opacity: .8; }
 .msg a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
 .msg.left a { color: #0b63ce; }
 @media (prefers-color-scheme: dark) { .msg.left a { color: #8ab4f8; } }
@@ -488,7 +492,8 @@ function showNotice(message, info = false) {
   notice.classList.toggle("info", !!message && info);
 }
 
-const same = (a, b) => a.side === b.side && a.text === b.text && (a.kind || "text") === (b.kind || "text") && !!a.video === !!b.video &&
+const quoteKey = (m) => (m.quote ? m.quote.name + "\n" + m.quote.text : "");
+const same = (a, b) => a.side === b.side && a.text === b.text && quoteKey(a) === quoteKey(b) && (a.kind || "text") === (b.kind || "text") && !!a.video === !!b.video &&
   (a.media || null) === (b.media || null) && a.w === b.w && a.h === b.h;
 
 function fillMedia(el) {
@@ -534,6 +539,14 @@ function bubble(m) {
   } else {
     if (m.text.startsWith("📄 ")) { el.textContent = m.text; el.classList.add("file"); }   // 收到的檔案：可點擊取得下載連結
     else linkify(el, m.text);
+    if (m.quote) {
+      // 這則是回覆：先顯示被回覆的那一則（寄件者＋內容），下面才是這則的文字
+      const q = document.createElement("div"); q.className = "quote";
+      const who = document.createElement("b"); who.textContent = m.quote.name || "";
+      const what = document.createElement("span"); what.textContent = m.quote.text || "";
+      q.append(who, what);
+      el.prepend(q);
+    }
   }
   el.tabIndex = 0;
   el.setAttribute("aria-haspopup", "menu");
@@ -1191,7 +1204,9 @@ function menuTargetOf(el) {
     const img = el.querySelector("img");
     return { kind: "image", dataUrl: img && img.src.startsWith("data:") ? img.src : "" };
   }
-  return { kind: "text", text: el.textContent };
+  // 文字以訊息資料為準（氣泡裡可能還有引用的那一則，複製／轉傳不要連引用一起帶）
+  const m = shown[Number(el.dataset.index)];
+  return { kind: "text", text: m && (m.kind || "text") === "text" ? m.text : el.textContent };
 }
 function openMenu(el, x, y) {
   if (forwarding || selecting || menuEl === el || el.classList.contains("center")) return;  // 系統訊息不能操作
