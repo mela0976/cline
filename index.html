@@ -77,8 +77,11 @@ button { font: inherit; color: inherit; cursor: pointer; }
 #back:disabled { opacity: .45; cursor: default; }
 body[data-view="list"] #back, body[data-view="list"] #log, body[data-view="list"] #composer, body[data-view="chat"] #chats { display: none; }
 #chats { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding-bottom: env(safe-area-inset-bottom); }
-#chats-bar { display: flex; justify-content: flex-end; padding: 8px 12px 0; }
-#chats-refresh { border: 1px solid var(--line); background: var(--bar); color: var(--dim); border-radius: 22px; padding: 4px 18px; font-size: 14px; min-height: 44px; }
+/* 重新整理：頁首最右邊，只在聊天列表頁顯示 */
+#chats-refresh { flex: none; border: 1px solid var(--line); background: none; color: var(--ink); border-radius: 8px; padding: 6px 12px; font-size: 14px; min-height: 44px; }
+body[data-view="chat"] #chats-refresh { display: none; }
+header { gap: 8px; }
+#status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #chats-refresh:disabled { opacity: .55; cursor: default; }
 #chat-list { list-style: none; margin: 0; padding: 0; }
 #chat-list li { border-bottom: 1px solid var(--line); }
@@ -99,6 +102,9 @@ body[data-view="list"] #back, body[data-view="list"] #log, body[data-view="list"
   max-width: 78%; padding: 10px 14px; border-radius: 18px; line-height: 1.55;
   white-space: pre-wrap; overflow-wrap: anywhere; box-shadow: 0 1px 1px rgb(0 0 0 / .08);
 }
+.msg a { color: inherit; text-decoration: underline; text-underline-offset: 2px; overflow-wrap: anywhere; }
+.msg.left a { color: #0b63ce; }
+@media (prefers-color-scheme: dark) { .msg.left a { color: #8ab4f8; } }
 .msg.left { align-self: flex-start; background: var(--theirs); border-top-left-radius: 4px; }
 .msg.right { align-self: flex-end; background: var(--mine); color: var(--mine-ink); border-top-right-radius: 4px; }
 /* LINE 的系統訊息（「您已收回訊息」等）：置中的小灰字，不能長按 */
@@ -210,10 +216,10 @@ button:active:not(:disabled) { transform: scale(.96); filter: brightness(.9); }
   <span id="target">聊天</span>
   <span id="status" role="status">連線中</span>
   <button id="reset" type="button">重設連線</button>
+  <button id="chats-refresh" type="button" aria-label="重新整理聊天列表">重新整理</button>
 </header>
 <p id="notice" role="alert" hidden></p>
 <section id="chats" aria-label="聊天列表">
-  <div id="chats-bar"><button id="chats-refresh" type="button">重新整理</button></div>
   <ul id="chat-list"></ul>
   <p id="chat-empty" hidden>沒有可選的聊天室</p>
 </section>
@@ -494,6 +500,27 @@ function fillMedia(el) {
   el.append(img);
 }
 
+// 把文字裡的網址（http/https、www.）變成可點的連結；其餘照原樣當純文字，不解析任何 HTML
+const URL_RE = /((?:https?:\/\/|www\.)[^\s<>"'，。；、（）「」【】]+)/gi;
+function linkify(el, value) {
+  el.textContent = "";
+  for (const part of value.split(URL_RE)) {
+    if (!part) continue;
+    if (/^(?:https?:\/\/|www\.)/i.test(part)) {
+      const tail = (part.match(/[.,!?:;)\]]+$/) || [""])[0];   // 句尾的標點不算在網址裡
+      const url = tail ? part.slice(0, -tail.length) : part;
+      let href = /^www\./i.test(url) ? "https://" + url : url;
+      try { href = new URL(href).href; } catch { el.append(part); continue; }
+      const a = document.createElement("a");
+      a.href = href; a.textContent = url; a.target = "_blank"; a.rel = "noopener noreferrer";
+      el.append(a);
+      if (tail) el.append(tail);
+    } else {
+      el.append(part);
+    }
+  }
+}
+
 function bubble(m) {
   const el = document.createElement("div");
   el.className = "msg " + (m.side === "right" ? "right" : m.side === "center" ? "center" : "left");
@@ -505,8 +532,8 @@ function bubble(m) {
     if (m.media) { el.dataset.media = m.media; fillMedia(el); }
     if (m.video) el.classList.add("video");   // 影片：點了請後端向 LINE 取得 mp4，再用連結播放
   } else {
-    el.textContent = m.text;
-    if (m.text.startsWith("📄 ")) el.classList.add("file");   // 收到的檔案：可點擊取得下載連結
+    if (m.text.startsWith("📄 ")) { el.textContent = m.text; el.classList.add("file"); }   // 收到的檔案：可點擊取得下載連結
+    else linkify(el, m.text);
   }
   el.tabIndex = 0;
   el.setAttribute("aria-haspopup", "menu");
@@ -1264,8 +1291,10 @@ list.addEventListener("keydown", (ev) => {
 list.addEventListener("click", (ev) => {
   const el = ev.target.closest(".msg");
   if (!el) return;
-  if (selecting) return toggleSel(el);
-  if (noTap || forwarding) return;
+  const link = ev.target.closest("a");
+  if (selecting) { if (link) ev.preventDefault(); return toggleSel(el); }   // 選取模式下點到連結不要開
+  if (noTap || forwarding) { if (link) ev.preventDefault(); return; }       // 長按叫出選單的那一下也不要開
+  if (link) return;   // 一般點連結：讓瀏覽器開新分頁
   if (el.classList.contains("file") || el.classList.contains("video")) return requestFile(el);
   if (!el.classList.contains("media") || !el.querySelector("img")) return;
   openViewer(el);
